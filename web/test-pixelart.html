@@ -1,0 +1,426 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>House of Imbibe · pixel lab test</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" />
+  <style>
+    :root {
+      --bg: #f1e3c4; --bg-deep: #d9c69a; --ink: #2a1a0e; --ink-soft: #6b4a2c;
+      --rust: #c44d20; --green: #5fa840; --blue: #3868b0; --gold: #d6a23a;
+      --shadow: #1a0d05; --danger: #b03030;
+    }
+    * { box-sizing: border-box; }
+    img, canvas { image-rendering: pixelated; }
+    html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink); font-family: "Press Start 2P","VT323",monospace; font-size: 14px; line-height: 1.6; min-height: 100vh; }
+    body { background-image: repeating-linear-gradient(0deg,transparent 0,transparent 3px,rgba(0,0,0,0.04) 3px,rgba(0,0,0,0.04) 4px); padding: 32px 16px 64px; }
+    .wrap { max-width: 1080px; margin: 0 auto; }
+    .title { display: flex; align-items: center; gap: 16px; margin-bottom: 4px; }
+    .title svg { width: 40px; height: 40px; flex-shrink: 0; background: transparent; }
+    .title h1 { font-size: 22px; margin: 0; letter-spacing: 1px; color: var(--rust); text-shadow: 2px 2px 0 var(--shadow); }
+    .subtitle { font-family: "VT323",monospace; font-size: 22px; color: var(--ink-soft); margin: 0 0 24px 56px; }
+    .panel { background: var(--bg-deep); border: 2px solid var(--shadow); box-shadow: 4px 4px 0 var(--shadow); padding: 20px; margin-bottom: 24px; }
+    .panel h2 { font-size: 14px; margin: 0 0 16px; color: var(--ink); text-transform: uppercase; letter-spacing: 1px; }
+    .panel h3 { font-size: 10px; color: var(--ink-soft); margin: 0 0 10px; text-transform: uppercase; letter-spacing: 1px; }
+    .drop { border: 3px dashed var(--shadow); background: var(--bg); padding: 28px 20px; text-align: center; cursor: pointer; transition: transform 0.08s,background 0.12s; }
+    .drop:hover { background: #f6ecd1; }
+    .drop.dragover { background: var(--gold); transform: translate(-2px,-2px); box-shadow: 4px 4px 0 var(--shadow); }
+    .drop .hint { font-family: "VT323",monospace; font-size: 22px; color: var(--ink-soft); margin-top: 8px; }
+    .drop .file { font-size: 11px; color: var(--ink); margin-top: 12px; word-break: break-all; }
+    .drop input { display: none; }
+    .controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin: 16px 0 0; }
+    .controls > * { font-family: inherit; }
+    .label { font-size: 10px; color: var(--ink-soft); text-transform: uppercase; letter-spacing: 1px; white-space: nowrap; }
+    .tabs { display: inline-flex; border: 2px solid var(--shadow); background: var(--bg); }
+    .tabs button { font-family: inherit; font-size: 10px; background: transparent; color: var(--ink); border: 0; padding: 8px 12px; cursor: pointer; letter-spacing: 1px; border-right: 2px solid var(--shadow); }
+    .tabs button:last-child { border-right: 0; }
+    .tabs button.active { background: var(--rust); color: var(--bg); text-shadow: 1px 1px 0 var(--shadow); }
+    .tabs button:hover:not(.active) { background: var(--bg-deep); }
+    .select { font-family: inherit; font-size: 12px; background: var(--bg); color: var(--ink); border: 2px solid var(--shadow); padding: 6px 10px; box-shadow: 2px 2px 0 var(--shadow); }
+    .select:focus { outline: 2px solid var(--rust); outline-offset: 1px; }
+    .btn { font-family: inherit; font-size: 12px; letter-spacing: 1px; border: 2px solid var(--shadow); padding: 10px 18px; cursor: pointer; box-shadow: 3px 3px 0 var(--shadow); transition: transform 0.08s,box-shadow 0.08s; text-shadow: 1px 1px 0 var(--shadow); }
+    .btn:hover { transform: translate(-1px,-1px); box-shadow: 4px 4px 0 var(--shadow); }
+    .btn:active { transform: translate(2px,2px); box-shadow: 1px 1px 0 var(--shadow); }
+    .btn[disabled] { background: #888 !important; cursor: not-allowed; opacity: 0.6; }
+    .btn-go { background: var(--green); color: var(--bg); font-size: 14px; padding: 12px 24px; margin-left: auto; }
+    .btn-desc { background: var(--blue); color: var(--bg); }
+    .btn-clear { background: var(--ink-soft); color: var(--bg); }
+    .status { margin-top: 16px; font-family: "VT323",monospace; font-size: 20px; min-height: 28px; color: var(--ink-soft); }
+    .status .err { color: var(--danger); }
+    .status .ok { color: var(--green); }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+    @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
+    .stage { background: var(--bg); border: 2px solid var(--shadow); box-shadow: 3px 3px 0 var(--shadow); padding: 14px; min-height: 200px; position: relative; }
+    .stage .body { display: flex; align-items: center; justify-content: center; min-height: 160px; }
+    .stage.empty .body { color: var(--ink-soft); font-family: "VT323",monospace; font-size: 18px; opacity: 0.5; }
+    .stage img { max-width: 100%; max-height: 360px; display: block; image-rendering: pixelated; }
+    .desc-textarea { font-family: "VT323",monospace; font-size: 20px; line-height: 1.4; color: var(--ink); padding: 8px; background: var(--bg); border: 2px solid var(--shadow); width: 100%; min-height: 120px; resize: vertical; outline: none; }
+    .desc-textarea:focus { border-color: var(--rust); box-shadow: 2px 2px 0 var(--rust); }
+    .desc-textarea::placeholder { color: var(--ink-soft); opacity: 0.5; }
+    .four { display: grid; grid-template-columns: repeat(4,1fr); gap: 8px; width: 100%; }
+    .four .cell { background: var(--bg-deep); border: 2px solid var(--shadow); padding: 4px; display: flex; flex-direction: column; align-items: center; }
+    .four .cell img { width: 100%; max-width: 96px; image-rendering: pixelated; }
+    .four .cell .lbl { font-size: 9px; margin-top: 4px; color: var(--ink-soft); }
+    .foot { font-family: "VT323",monospace; font-size: 18px; color: var(--ink-soft); text-align: center; margin-top: 24px; opacity: 0.7; }
+    @keyframes blink { 0%,49% { opacity: 1; } 50%,100% { opacity: 0; } }
+    .blink { animation: blink 1s steps(1) infinite; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+
+    <header class="title">
+      <svg viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges" aria-hidden="true" style="background:transparent;">
+        <rect x="6" y="8" width="16" height="20" fill="#d6a23a" shape-rendering="crispEdges"/>
+        <rect x="6" y="8" width="16" height="4" fill="#f6e8a8" shape-rendering="crispEdges"/>
+        <rect x="22" y="12" width="6" height="10" fill="none" stroke="#2a1a0e" stroke-width="2" shape-rendering="crispEdges"/>
+        <rect x="4" y="6" width="2" height="2" fill="#2a1a0e" shape-rendering="crispEdges"/>
+        <rect x="8" y="4" width="2" height="2" fill="#2a1a0e" shape-rendering="crispEdges"/>
+        <rect x="14" y="4" width="2" height="2" fill="#2a1a0e" shape-rendering="crispEdges"/>
+        <rect x="4" y="28" width="20" height="2" fill="#2a1a0e" shape-rendering="crispEdges"/>
+      </svg>
+      <h1>House of Imbibe</h1>
+    </header>
+    <p class="subtitle">pixel lab test</p>
+
+    <!-- ====== panel 1: upload ====== -->
+    <section class="panel">
+      <h2>1. drop a photo</h2>
+      <label class="drop" id="drop">
+        <input type="file" id="file" accept="image/png,image/jpeg,image/webp,image/gif" />
+        <div style="font-size:12px;">click or drop an image here</div>
+        <div class="hint">(PNG · JPEG · WEBP · GIF — up to 20 MB)</div>
+        <div class="file" id="fileName">&nbsp;</div>
+      </label>
+
+      <div class="controls">
+        <span class="label">mode</span>
+        <div class="tabs" role="tablist">
+          <button id="modeSingle" data-mode="single">single image</button>
+          <button id="modeAvatar" class="active" data-mode="avatar">4-dir character</button>
+          <button id="modeText" data-mode="text">text → pixel</button>
+        </div>
+
+        <span class="label">size</span>
+        <select class="select" id="size">
+          <option value="64">64 px</option>
+          <option value="128">128 px</option>
+          <option value="256">256 px</option>
+        </select>
+
+        <span class="label" id="tplLabel">template</span>
+        <select class="select" id="template">
+          <option value="mannequin" selected>mannequin</option>
+          <option value="chibi">chibi</option>
+          <option value="cartoon">cartoon</option>
+          <option value="stylized">stylized</option>
+          <option value="bear">bear</option>
+          <option value="cat">cat</option>
+          <option value="dog">dog</option>
+          <option value="horse">horse</option>
+          <option value="lion">lion</option>
+        </select>
+
+        <button class="btn btn-desc" id="btnDescribe" disabled>Describe</button>
+        <button class="btn btn-go" id="go" disabled>Generate</button>
+      </div>
+
+      <div class="status" id="status">drop an image to begin, or switch to text mode.</div>
+    </section>
+
+    <!-- ====== panel 2: description ====== -->
+    <section class="panel">
+      <h2>2. description <span style="font-size:9px;color:var(--ink-soft);">(editable)</span></h2>
+      <textarea class="desc-textarea" id="descInput" placeholder="Type a description here, or upload an image and click 'Describe' to fill this automatically.&#10;&#10;Example: A small orange tabby cat with bright green eyes, sitting upright. Pixel art character sprite."></textarea>
+      <div class="controls" style="margin-top:12px;">
+        <button class="btn btn-go" id="goFromText" style="margin-left:0;">Generate from text</button>
+        <button class="btn btn-clear" id="btnClear">Clear</button>
+      </div>
+    </section>
+
+    <!-- ====== panel 3: results ====== -->
+    <section class="panel">
+      <h2>3. results</h2>
+      <div class="grid">
+        <div class="stage empty" id="inputStage">
+          <h3>input</h3><div class="body">no image yet</div>
+        </div>
+        <div class="stage empty" id="descStage">
+          <h3>preview</h3><div class="body">awaiting generation…</div>
+        </div>
+        <div class="stage empty" id="outputStage" style="grid-column:1/-1;">
+          <h3 id="outputTitle">pixel art output</h3>
+          <div class="body">awaiting generation…</div>
+        </div>
+      </div>
+    </section>
+
+    <p class="foot">~$0.007 per image · ~$0.013 per 4-dir character</p>
+  </div>
+
+  <script>
+    "use strict";
+    let pickedFile = null;
+    let mode = "avatar";
+    let pollTimer = null;
+
+    const $ = (id) => document.getElementById(id);
+    const setStatus = (msg, cls) => {
+      const el = $("status");
+      el.innerHTML = "";
+      const span = document.createElement("span");
+      if (cls) span.className = cls;
+      span.innerHTML = msg;
+      el.appendChild(span);
+    };
+
+    // ───── file picker ─────
+    const drop = $("drop"), fileInput = $("file"), fileName = $("fileName");
+    drop.addEventListener("click", () => fileInput.click());
+    fileInput.addEventListener("change", () => { if (fileInput.files[0]) onFile(fileInput.files[0]); });
+    ["dragenter","dragover"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("dragover"); }));
+    ["dragleave","drop"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("dragover"); }));
+    drop.addEventListener("drop", e => { if (e.dataTransfer.files[0]) onFile(e.dataTransfer.files[0]); });
+
+    function onFile(f) {
+      pickedFile = f;
+      fileName.textContent = f.name + "  (" + Math.round(f.size/1024) + " KB)";
+      $("go").disabled = false;
+      $("btnDescribe").disabled = false;
+      $("inputStage").classList.remove("empty");
+      $("inputStage").querySelector(".body").innerHTML = '<img src="' + URL.createObjectURL(f) + '" alt="input" />';
+      if (mode === "text") setMode("avatar");
+      setStatus("ready. click Describe then Generate.","ok");
+      $("descStage").classList.add("empty");
+      $("descStage").querySelector(".body").textContent = "click 'Describe' to auto-fill";
+      $("outputStage").classList.add("empty");
+      $("outputStage").querySelector(".body").textContent = "awaiting generation…";
+    }
+
+    // ───── mode toggle ─────
+    $("modeSingle").addEventListener("click", () => setMode("single"));
+    $("modeAvatar").addEventListener("click", () => setMode("avatar"));
+    $("modeText").addEventListener("click", () => setMode("text"));
+
+    function setMode(m) {
+      mode = m;
+      $("modeSingle").classList.toggle("active", m === "single");
+      $("modeAvatar").classList.toggle("active", m === "avatar");
+      $("modeText").classList.toggle("active", m === "text");
+      const isAvatar = m === "avatar";
+      $("template").style.display = isAvatar ? "" : "none";
+      $("tplLabel").style.display = isAvatar ? "" : "none";
+      $("size").value = isAvatar ? "64" : "256";
+      if (m === "text") {
+        $("go").disabled = true;
+        $("btnDescribe").disabled = true;
+        setStatus("type a description above, then click 'Generate from text'.","ok");
+      } else if (pickedFile) {
+        $("go").disabled = false;
+        $("btnDescribe").disabled = false;
+        setStatus("ready. click Describe then Generate.","ok");
+      } else {
+        $("go").disabled = true;
+        $("btnDescribe").disabled = true;
+        setStatus("drop an image to begin.","");
+      }
+    }
+    setMode("avatar");
+
+    // ───── Describe (vision-only, NO generation) ─────
+    $("btnDescribe").addEventListener("click", async () => {
+      if (!pickedFile) return;
+      $("btnDescribe").disabled = true;
+      setStatus("describing image… <span class='blink'>▌</span>");
+      const fd = new FormData();
+      fd.append("image", pickedFile);
+
+      try {
+        const resp = await fetch("/api/describe", { method: "POST", body: fd });
+        const data = await resp.json();
+        if (!resp.ok) {
+          setStatus("vision error: " + (data.error || resp.statusText) + ". Please type a description manually.","err");
+          $("descStage").classList.remove("empty");
+          $("descStage").querySelector(".body").innerHTML =
+            '<div class="desc" style="color:var(--danger);">' + escapeHtml(data.error || "vision unavailable") +
+            '<br><br>Type a description manually in the text box above.</div>';
+          return;
+        }
+        if (data.description && data.description.trim()) {
+          $("descInput").value = data.description;
+          $("descStage").classList.remove("empty");
+          $("descStage").querySelector(".body").innerHTML =
+            '<div class="desc">' + escapeHtml(data.description) + "</div>";
+          setStatus("description ready. Edit it above, then click Generate.","ok");
+        } else {
+          setStatus("no description returned. Please type one manually.","err");
+        }
+      } catch (e) {
+        setStatus("network error: " + e + ". Type a description manually.","err");
+      } finally {
+        $("btnDescribe").disabled = false;
+      }
+    });
+
+    // ───── Generate (image mode) ─────
+    $("go").addEventListener("click", async () => {
+      if (!pickedFile) return;
+      $("go").disabled = true;
+      const desc = $("descInput").value.trim();
+      try {
+        if (mode === "single") await runVisionWithImage(desc);
+        else await runAvatarWithImage(desc);
+      } finally { $("go").disabled = false; }
+    });
+
+    // ───── Generate from text ─────
+    $("goFromText").addEventListener("click", async () => {
+      const desc = $("descInput").value.trim();
+      if (!desc) { setStatus("please type a description first.","err"); return; }
+      $("goFromText").disabled = true;
+      try {
+        if (mode === "avatar") await runAvatarText(desc);
+        else await runVisionText(desc);
+      } finally { $("goFromText").disabled = false; }
+    });
+
+    $("btnClear").addEventListener("click", () => {
+      $("descInput").value = "";
+      $("descStage").classList.add("empty");
+      $("descStage").querySelector(".body").textContent = "awaiting generation…";
+      $("outputStage").classList.add("empty");
+      $("outputStage").querySelector(".body").textContent = "awaiting generation…";
+      setStatus("cleared.","");
+    });
+
+    // ───── API calls ─────
+    async function runVisionWithImage(manualDesc) {
+      setStatus("generating pixel art… <span class='blink'>▌</span>");
+      const fd = new FormData();
+      fd.append("image", pickedFile);
+      fd.append("size", $("size").value);
+      if (manualDesc) fd.append("description", manualDesc);
+
+      const resp = await fetch("/api/vision", { method: "POST", body: fd });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({ error: resp.statusText }));
+        setStatus("error: " + err.error,"err");
+        return;
+      }
+      const data = await resp.json();
+      showOutputImage(data.png_b64);
+      setStatus("done · " + data.size + "px · method: " + (data.method || "?"),"ok");
+    }
+
+    async function runAvatarWithImage(manualDesc) {
+      setStatus("submitting avatar job… <span class='blink'>▌</span>");
+      const fd = new FormData();
+      fd.append("image", pickedFile);
+      fd.append("size", $("size").value);
+      fd.append("template", $("template").value);
+      fd.append("proportions", "chibi");
+      if (manualDesc) fd.append("description", manualDesc);
+
+      const resp = await fetch("/api/avatar", { method: "POST", body: fd });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({ error: resp.statusText }));
+        setStatus("error: " + err.error,"err");
+        return;
+      }
+      const { job_id } = await resp.json();
+      startPolling(job_id);
+    }
+
+    async function runVisionText(desc) {
+      setStatus("generating from text… <span class='blink'>▌</span>");
+      const resp = await fetch("/api/vision-text", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ description: desc, size: parseInt($("size").value) }),
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({ error: resp.statusText }));
+        setStatus("error: " + err.error,"err");
+        return;
+      }
+      const data = await resp.json();
+      showOutputImage(data.png_b64);
+      setStatus("done · " + data.size + "px","ok");
+    }
+
+    async function runAvatarText(desc) {
+      setStatus("submitting avatar job… <span class='blink'>▌</span>");
+      const resp = await fetch("/api/avatar-text", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          description: desc,
+          size: parseInt($("size").value),
+          template: $("template").value,
+          proportions: "chibi",
+        }),
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({ error: resp.statusText }));
+        setStatus("error: " + err.error,"err");
+        return;
+      }
+      const { job_id } = await resp.json();
+      startPolling(job_id);
+    }
+
+    function startPolling(jobId) {
+      if (pollTimer) clearInterval(pollTimer);
+      setStatus("job " + jobId.slice(0,8) + " submitted. polling… <span class='blink'>▌</span>");
+      const start = Date.now();
+      pollTimer = setInterval(async () => {
+        try {
+          const r = await fetch("/api/avatar/" + jobId);
+          const j = await r.json();
+          if (j.description) {
+            $("descInput").value = j.description;
+            $("descStage").classList.remove("empty");
+            $("descStage").querySelector(".body").innerHTML =
+              '<div class="desc">' + escapeHtml(j.description) + "</div>";
+          }
+          if (j.status === "completed") {
+            clearInterval(pollTimer);
+            showFourDirs(j.rotations);
+            setStatus("done in " + Math.round((Date.now()-start)/1000) + "s · 4 directions","ok");
+          } else if (j.status === "failed") {
+            clearInterval(pollTimer);
+            setStatus("job failed: " + (j.error||"unknown"),"err");
+          } else {
+            setStatus("polling… " + Math.round((Date.now()-start)/1000) + "s · " + j.status + " <span class='blink'>▌</span>");
+          }
+        } catch (e) {
+          clearInterval(pollTimer);
+          setStatus("poll error: " + e,"err");
+        }
+      }, 3000);
+    }
+
+    function showOutputImage(b64) {
+      $("outputStage").classList.remove("empty");
+      $("outputTitle").textContent = "pixel art output";
+      $("outputStage").querySelector(".body").innerHTML =
+        '<img src="data:image/png;base64,' + b64 + '" alt="pixel art" />';
+    }
+
+    function showFourDirs(rotations) {
+      $("outputStage").classList.remove("empty");
+      $("outputTitle").textContent = "4-direction character (64×64, GBA style)";
+      $("outputStage").querySelector(".body").innerHTML = '<div class="four">' +
+        rotations.map(r => '<div class="cell"><img src="' + r.url + '" alt="' + r.direction + '" /><div class="lbl">' + r.direction.toUpperCase() + "</div></div>").join("") +
+        "</div>";
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+    }
+  </script>
+</body>
+</html>

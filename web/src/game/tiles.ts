@@ -1,4 +1,4 @@
-// game/ — 纯 canvas 纹理生成，不 import phaser。
+// game/ — 碰撞渲染。地图数据唯一来源 = assets/maps/bar.json（经 game-state/map 装载）。
 // 短期手工像素 tile；工期3 由 PixelLab 生成的 tileset 替换（同尺寸契约：16×16）。
 
 export const TILE = 16;
@@ -63,16 +63,14 @@ export function barFrontTile(): HTMLCanvasElement {
 export function shelfTile(variant: number): HTMLCanvasElement {
   const [c, ctx] = makeCanvas(TILE, TILE);
   px(ctx, 0, 0, TILE, TILE, "#2e2115");
-  // 上下两条木板
   px(ctx, 0, 4, TILE, 2, "#5c4020");
   px(ctx, 0, 11, TILE, 2, "#5c4020");
-  // 瓶子：两排，颜色轮换
   const bottles = ["#3e7d4e", "#8a2e2e", "#b08430", "#3e5f8a", "#6b3e7d"];
   for (let i = 0; i < 4; i++) {
     const col = bottles[(i + variant) % bottles.length];
     const x = 1 + i * 4;
-    px(ctx, x, 0, 2, 4, col); // 上排瓶身
-    px(ctx, x, 0, 1, 1, "#d8d0c0"); // 瓶口高光
+    px(ctx, x, 0, 2, 4, col);
+    px(ctx, x, 0, 1, 1, "#d8d0c0");
     const col2 = bottles[(i + variant + 2) % bottles.length];
     px(ctx, x, 7, 2, 4, col2);
     px(ctx, x, 7, 1, 1, "#d8d0c0");
@@ -83,12 +81,12 @@ export function shelfTile(variant: number): HTMLCanvasElement {
 /** 桌子 + 蜡烛 */
 export function tableTile(): HTMLCanvasElement {
   const [c, ctx] = makeCanvas(TILE, TILE);
-  px(ctx, 0, 0, TILE, TILE, "#6b4a2e"); // 地板底
+  px(ctx, 0, 0, TILE, TILE, "#6b4a2e");
   px(ctx, 0, 8, TILE, 1, "#57391f");
   px(ctx, 2, 2, 12, 12, "#4a3018");
   px(ctx, 3, 3, 10, 10, "#5c4020");
-  px(ctx, 7, 6, 2, 4, "#d8d0c0"); // 蜡烛
-  px(ctx, 7, 5, 2, 1, "#f0d060"); // 火苗
+  px(ctx, 7, 6, 2, 4, "#d8d0c0");
+  px(ctx, 7, 5, 2, 1, "#f0d060");
   return c;
 }
 
@@ -124,19 +122,9 @@ export function doorTile(): HTMLCanvasElement {
 }
 
 // ---------- 地图数据 ----------
+// 唯一来源 = assets/maps/bar.json，由 game-state/map 装载并 re-export。
 // 15×10，图例：# 墙  . 地板  B 吧台面  b 吧台正面  S 酒架  T 桌子  s 凳子  r 地毯  D 门
-export const MAP_ROWS = [
-  "###############",
-  "#SSSSSSSS....#",
-  "#.............#",
-  "#BBBBBBB..T.T.#",
-  "#bbbbbbb.s....#",
-  "#..s.....T.T..#",
-  "#..rrrr.......#",
-  "#.Trrrr..T....#",
-  "#..rrrr.....s.#",
-  "#######D#######",
-];
+export { BAR_MAP } from "../game-state/map";
 
 export interface MapDef {
   rows: string[];
@@ -146,13 +134,6 @@ export interface MapDef {
   interact: Record<string, string>;
   spawn: { tx: number; ty: number };
 }
-
-export const BAR_MAP: MapDef = {
-  rows: MAP_ROWS,
-  solid: new Set(["#", "B", "b", "S", "T"]),
-  interact: { B: "menu", b: "menu", S: "menu" },
-  spawn: { tx: 7, ty: 6 },
-};
 
 /** 把整张地图合成到一张 canvas（240×160），场景里作为单张背景图 */
 export function renderMap(map: MapDef): HTMLCanvasElement {

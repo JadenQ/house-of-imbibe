@@ -4,6 +4,9 @@ import { api, type AvatarData, type Me } from "./net/api";
 import { showLogin } from "./ui/login";
 import { showAvatarCreate } from "./ui/avatarCreate";
 import { showMenu, isMenuOpen, menuBlocksInteract } from "./ui/menu";
+import { createChatPanel } from "./ui/chat";
+import { WsClient } from "./net/ws";
+import { msg } from "./protocol/types";
 import { BarScene } from "./scene/BarScene";
 
 const LOGICAL_W = 240;
@@ -20,6 +23,15 @@ function startGame(me: Me, avatar: AvatarData) {
   hud.style.display = "block";
   document.getElementById("hud-user")!.textContent = me.username;
 
+  // 聊天侧栏
+  const gameEl = document.getElementById("game")!;
+  const chat = createChatPanel(gameEl);
+
+  // WS 传输 + 状态（scene 内部消费消息）
+  const transport = new WsClient();
+  transport.connect();
+  chat.onSend((text) => transport.send(JSON.stringify(msg.chat(text))));
+
   const game = new Phaser.Game({
     type: Phaser.AUTO,
     parent: "game",
@@ -31,7 +43,7 @@ function startGame(me: Me, avatar: AvatarData) {
     backgroundColor: "#14100e",
     scene: [],
   });
-  game.scene.add("bar", BarScene, true, { avatar });
+  game.scene.add("bar", BarScene, true, { avatar, transport, selfId: me.id, chatPanel: chat.panel });
 
   window.addEventListener("resize", () => game.scale.setZoom(fitZoom()));
 

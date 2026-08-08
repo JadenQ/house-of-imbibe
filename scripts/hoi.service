@@ -1,0 +1,22 @@
+# House of Imbibe — systemd unit 模板（部署到 VPS 时参考；本地 dev 用 justfile/Makefile）。
+# 1) cp scripts/hoi.service /etc/systemd/system/hoi.service （改 User/WorkingDirectory/ExecStart 路径）
+# 2) sudo systemctl daemon-reload && sudo systemctl enable --now hoi
+[Unit]
+Description=House of Imbibe (Rust single-binary pixel bar)
+After=network.target
+
+[Service]
+Type=simple
+User=hoi
+WorkingDirectory=/opt/hoi
+Environment=DATABASE_URL=sqlite:/opt/hoi/data/hoi.db
+Environment=STATIC_DIR=/opt/hoi/web/dist
+Environment=PORT=8080
+# Environment=PIXELLAB_API_KEY=...   # 形象生成开关；不设则禁用
+# Environment=MINIMAX_API_KEY=...
+ExecStart=/opt/hoi/house-of-imbibe
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

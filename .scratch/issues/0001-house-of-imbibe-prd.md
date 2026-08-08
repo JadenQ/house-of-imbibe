@@ -81,7 +81,7 @@ button); desktop keyboard is a fallback.
 - **Frontend**: Phaser 4 + TypeScript + Vite. Logical resolution 240×160, integer-scaled, `imageSmoothingEnabled=false`.
 - **Backend**: Rust, Axum 0.8, SQLite in WAL mode, sqlx 0.8 (compile-time-checked queries). Single binary serves API + WS + the built frontend (`tower_http::services::ServeDir` on `./dist`).
 - **Realtime**: Axum WebSocket upgrade + `tokio::sync::broadcast` per room + `DashMap` for room/player state. **Server-authoritative position clamp**; clients send movement intent, server ticks a 10 Hz delta snapshot, clients interpolate (~100-200 ms).
-- **Auth**: username + password only (no email, no email verification). `argon2id` hashing (OWASP params). `tower-sessions` cookie sessions. A `role` column on `users` (`member` | `admin`); first registered user is seeded admin, or an env-flag bootstrap admin.
+- **Auth**: username + password only (no email, no email verification). `argon2id` hashing (m=19456,t=2,p=1 — the argon2 crate default). Hand-rolled `sessions` table + `hoi_session` cookie (no `tower-sessions` dep — per the lightweight mandate). An `is_admin` boolean column on `users`; the first registered user is seeded admin (no env-flag bootstrap in MVP).
 - **Generation**: PixelLab.ai via its official MCP/API (`create_character`, `create_image_pixflux`, `create_map_object`, `animate_character`). Called from a background tokio task; never on the request path.
 - **Storage**: `object_store` crate behind a trait; `LocalFileSystem` at MVP, swappable to Cloudflare R2 with no business-code change.
 - **Deploy**: single static binary + SQLite file on a Hetzner VPS, behind Caddy (auto TLS), managed by systemd. ~€5/month.
@@ -102,7 +102,7 @@ Accessory equipping (back / hand slots) is a runtime overlay composition: the ac
 - One room per server (MVP). State: `players: Map<id, {x, y, dir, avatar_snapshot, name}>`.
 - Inbound client messages: `{type:"move", tx, ty}` (target tile intent), `{type:"chat", text}`, `{type:"interact", target}`.
 - Server clamps movement to walkable tiles (from the Tiled collision layer), updates state, broadcasts a **delta snapshot** at 10 Hz (only changed players). New connections get a full snapshot on join.
-- Chat is fire-and-forget: server rebroadcasts to the room and keeps an in-memory ring buffer (last 50) per room for late-joiners and the side panel. **Chat is never persisted to the DB.**
+- Chat is fire-and-forget: server rebroadcasts to all connections and keeps a **global** in-memory ring buffer (last 50, cross-scene — one buffer for the whole bar; see dev-plan §0-C) for late-joiners and the side panel. **Chat is never persisted to the DB.**
 
 ### Map & decorations
 
@@ -123,7 +123,9 @@ Accessory equipping (back / hand slots) is a runtime overlay composition: the ac
 ### Schema (decision-rich sketch; from v2 research, adapted: no email)
 
 ```sql
-users(id TEXT PK, username TEXT UNIQUE, password_hash TEXT, role TEXT, created_at TEXT)
+users(id INTEGER PK AUTOINCREMENT, username TEXT UNIQUE NOCASE, password_hash TEXT,
+      is_admin INTEGER NOT NULL DEFAULT 0, created_at INTEGER)
+sessions(token TEXT PK, user_id INTEGER FK->users ON DELETE CASCADE, created_at INTEGER) -- hand-rolled, no tower-sessions
 avatars(id TEXT PK, owner_id TEXT FK, kind TEXT,        -- 'modular' | 'generated'
         layers_json TEXT NULL,                          -- modular only
         sprite_asset_id TEXT NULL,                      -- generated only
@@ -136,10 +138,10 @@ generation_jobs(id TEXT PK, owner_id TEXT FK, kind TEXT, status TEXT,
 decorations(id TEXT PK, scene TEXT, tile_x INT, tile_y INT, asset_id TEXT FK,
             z_layer INT, placed_by TEXT FK, created_at TEXT)
 npcs(id TEXT PK, scene TEXT, npc_def_id TEXT, x INT, y INT)
--- chat is intentionally NOT persisted; held in-memory ring buffer per room.
+-- chat is intentionally NOT persisted; held in a GLOBAL in-memory ring buffer (50, cross-scene).
 ```
 
-`tower-sessions` manages its own session store table.
+Sessions use the hand-rolled `sessions` table above (no `tower-sessions` dep).
 
 ### Modules to build (seams respected)
 

@@ -269,7 +269,8 @@ pub trait WalkGrid: Send + Sync {
     fn portals(&self) -> &[Portal];   // 切片 5 才有内容，切片 1 空数组
 }
 ```
-切片 1 用 `RectGrid`（硬编码矩形）实现它；切片 5 用 `TmjGrid`（解析 .tmj）实现它，**服务端与客户端解析同一个 .tmj 文件**（不允许把碰撞信息在 Rust 里手写第二遍——两份必然漂移）。
+切片 1 原计划用 `RectGrid`（硬编码矩形）实现它；切片 5 用 `TmjGrid`（解析 .tmj）实现它，**服务端与客户端解析同一个 .tmj 文件**（不允许把碰撞信息在 Rust 里手写第二遍——两份必然漂移）。
+> **2026-08-08 demo 偏离**：demo 需要真实酒吧地图（"走到吧台按 E 开酒单"），故改用 `BarGrid`（解析共享的 `assets/maps/bar.json`，Rust `include_str!` + TS `import` 同一份）。`WalkGrid` 接口不变，切片 5 把 `BarGrid` 换成 `TmjGrid` 是加一个 impl + 指向 `.tmj`，非重写。
 房间容器从第一天起就是 `DashMap<SceneId, Room>`，`Room` 持有 `Arc<dyn WalkGrid>`。
 成本：一个 trait + 20 行矩形实现。不做的成本：切片 5 重写 WS handler / tick / 快照 / 聊天缓冲 / 前端场景管理。
 

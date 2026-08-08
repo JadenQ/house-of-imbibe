@@ -234,6 +234,7 @@ pub async fn pixellab_create_image_pixen(
 ///
 /// `color_image` — optional palette reference PNG bytes (e.g. `GBA_PALETTE_PNG`).
 /// `force_colors` — when true, PixelLab restricts output to the palette in `color_image`.
+#[allow(clippy::too_many_arguments)] // avatar-pipeline 预置代码；切片3b 重构时收敛参数
 pub async fn pixellab_create_character_4dir(
     http: &Client,
     key: &str,

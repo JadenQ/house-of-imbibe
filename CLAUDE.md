@@ -30,6 +30,7 @@ GBA/宝可梦绿宝石画风的 Web 像素社交酒吧。技术栈已锁定：**
 
 ## 其他硬约束
 
+- **移动端横屏优先**（设计第一原则，2026-08-08 用户锁定）：所有前端开发/改进必须支持移动端浏览器横屏适配——整数缩放、`imageSmoothingEnabled=false`、左虚拟摇杆 + 右动作键（DOM/CSS 实现，**不进 Phaser 渲染层**），桌面键盘（WASD/方向键 + 动作键）为回退方案。移动端适配优先级**高于**桌面：任何新功能先保证移动端横屏可用，再做桌面。当前 demo 仅桌面（触控是已知缺口，下个优先级）。
 - 注册 = 用户名+密码，**无邮箱、无第三方登录**；argon2id（m=19456,t=2,p=1，即 argon2 crate 默认值）
 - PixelLab Bearer token **只存后端**，绝不进前端代码/网络面板
 - 前端分层：`net/` `game/` `protocol/` **禁止 import phaser**；`scene/` 只读状态、只调 net
@@ -40,10 +41,16 @@ GBA/宝可梦绿宝石画风的 Web 像素社交酒吧。技术栈已锁定：**
 ## 运行
 
 ```bash
-# 后端（首次编译较慢）
-cargo run                      # :8080，服务 API + web/dist
-# 前端开发（另开终端）
-cd web && npm install && npm run dev   # :5173，/api 代理到 :8080
-# 生产
-cd web && npm run build && cargo run --release
+# 推荐：just（或 make，目标同名）—— 见 justfile / Makefile
+just dev        # vite :5173（HMR，/api 与 /ws 代理到 :8080）+ cargo run :8080（API+WS+web/dist）
+just test       # cargo test --all-targets + cd web && npm run test（离线）
+just build      # 前端 build → cargo build --release
+just run        # 单二进制生产运行 :8080
+just migrate    # 显式 DATABASE_URL=sqlite:data/hoi.db sqlx migrate run（头号踩坑：迁移前必须有 DATABASE_URL）
+scripts/run.sh  # 生产后台启动（pidfile 在 data/hoi.pid）；scripts/stop.sh 停止
+
+# 等价的原生命令（无 just 时）
+cargo run                      # :8080，服务 API + WS + web/dist
+cd web && npm install && npm run dev   # :5173，/api 与 /ws 代理到 :8080
+cd web && npm run build && cargo run --release   # 生产
 ```

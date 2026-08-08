@@ -1,0 +1,112 @@
+// protocol/ —— WS 消息类型，手工镜像 src/realtime/protocol.rs。
+// net/ protocol/ game-state/ 禁止 import phaser（dev-plan §2.3）。
+
+export type AvatarSnapshot =
+  | { kind: "modular"; skin: string; hair: string; shirt: string; pants: string }
+  | {
+      kind: "generated";
+      character_id: string;
+      rotations: { direction: string; url: string }[];
+    };
+
+export interface PlayerSnap {
+  id: number;
+  x: number;
+  y: number;
+  dir: string;
+  name: string;
+  avatar: AvatarSnapshot;
+  avatar_hash: string;
+  target_tx: number;
+  target_ty: number;
+}
+
+export interface ChatItem {
+  from: number;
+  name: string;
+  text: string;
+  ts: number;
+}
+
+export type ClientMsg =
+  | { v: number; type: "move"; tx: number; ty: number }
+  | { v: number; type: "chat"; text: string }
+  | { v: number; type: "interact"; target: string }
+  | { v: number; type: "dialogue_advance"; npc: string; choice?: string }
+  | { v: number; type: "ping"; t: number };
+
+export type ServerMsg =
+  | {
+      v: number;
+      type: "welcome";
+      self_id: number;
+      scene: string;
+      tick_hz: number;
+      server_time: number;
+    }
+  | {
+      v: number;
+      type: "snapshot_full";
+      tick: number;
+      t: number;
+      players: PlayerSnap[];
+      decorations: unknown[];
+      npcs: unknown[];
+    }
+  | {
+      v: number;
+      type: "snapshot_delta";
+      tick: number;
+      t: number;
+      upsert: PlayerSnap[];
+      remove: number[];
+    }
+  | {
+      v: number;
+      type: "chat";
+      from: number;
+      name: string;
+      text: string;
+      ts: number;
+    }
+  | { v: number; type: "chat_backlog"; items: ChatItem[] }
+  | { v: number; type: "dialogue"; npc: string; node: string; menu?: unknown }
+  | { v: number; type: "decoration_added"; decoration: unknown }
+  | { v: number; type: "decoration_removed"; id: number }
+  | { v: number; type: "scene_changed"; scene: string; spawn: [number, number] }
+  | { v: number; type: "kicked"; reason: string }
+  | { v: number; type: "error"; code: string; msg: string }
+  | { v: number; type: "pong"; t: number };
+
+const KNOWN_SERVER_TYPES = new Set<string>([
+  "welcome",
+  "snapshot_full",
+  "snapshot_delta",
+  "chat",
+  "chat_backlog",
+  "dialogue",
+  "decoration_added",
+  "decoration_removed",
+  "scene_changed",
+  "kicked",
+  "error",
+  "pong",
+]);
+
+/** 解析一帧 WS 文本；未知/非法 -> null（静默忽略，dev-plan §2.5）。 */
+export function parseMsg(raw: string): ServerMsg | null {
+  try {
+    const m = JSON.parse(raw) as { type?: unknown };
+    if (!m || typeof m.type !== "string") return null;
+    return KNOWN_SERVER_TYPES.has(m.type) ? (m as ServerMsg) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 构造客户端消息的小工厂（统一带 v:1）。 */
+export const msg = {
+  move: (tx: number, ty: number): ClientMsg => ({ v: 1, type: "move", tx, ty }),
+  chat: (text: string): ClientMsg => ({ v: 1, type: "chat", text }),
+  ping: (t: number): ClientMsg => ({ v: 1, type: "ping", t }),
+};

@@ -2,9 +2,11 @@
 name = "house-of-imbibe"
 version = "0.1.0"
 edition = "2021"
+# 多 bin 包：cargo run 默认跑主服务（否则要在 justfile/Makefile/scripts 里到处写 --bin）
+default-run = "house-of-imbibe"
 
 [dependencies]
-axum = { version = "0.8", features = ["multipart"] }
+axum = { version = "0.8", features = ["multipart", "ws"] }
 tokio = { version = "1", features = ["full"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
 serde = { version = "1", features = ["derive"] }
@@ -21,10 +23,19 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # 仅 image2pixel 二进制使用
 # 注意：不能用 default-features = false，否则会破坏 argon2 的 OsRng feature 解析
-reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "cookies"] }
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
+
+# 实时脊椎（切片 1）：房间状态 + WS stream split
+dashmap = "6"
+futures-util = "0.3"
+
+[dev-dependencies]
+# 集成测试 harness：真 WS 客户端 + 临时 SQLite
+tokio-tungstenite = { version = "0.24", features = ["connect"] }
+tempfile = "3"
 
 [profile.release]
 lto = true

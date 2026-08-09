@@ -34,6 +34,7 @@ export function showAvatarCreate(initial: AvatarData | null): Promise<AvatarData
           <div class="err" id="av-err"></div>
           <button class="btn" id="av-go" disabled>生 成 形 象</button>
           <button class="btn ghost" id="av-build">捏 脸（自 选 样 式）</button>
+          <button class="btn ghost" id="av-text">文 字 描 述</button>
           <button class="btn ghost" id="av-skip">使 用 默 认 形 象</button>
         </div></div>`;
 
@@ -42,6 +43,7 @@ export function showAvatarCreate(initial: AvatarData | null): Promise<AvatarData
       const fileName = document.getElementById("av-file-name")!;
       const goBtn = document.getElementById("av-go") as HTMLButtonElement;
       const buildBtn = document.getElementById("av-build") as HTMLButtonElement;
+      const textBtn = document.getElementById("av-text") as HTMLButtonElement;
       const skipBtn = document.getElementById("av-skip") as HTMLButtonElement;
       const errEl = document.getElementById("av-err")!;
       let pickedFile: File | null = null;
@@ -99,6 +101,9 @@ export function showAvatarCreate(initial: AvatarData | null): Promise<AvatarData
         });
       };
 
+      // 文字描述（2c）入口
+      textBtn.onclick = () => showTextEntry();
+
       // 跳过：使用默认配色
       skipBtn.onclick = async () => {
         const fallback = initial ?? DEFAULT_COLORS;
@@ -112,6 +117,42 @@ export function showAvatarCreate(initial: AvatarData | null): Promise<AvatarData
         }
         ui.innerHTML = "";
         resolve(fallback);
+      };
+    }
+
+    // 文字描述（2c）：写描述 → 非阻塞生成（复用 pollAvatarInBackground）
+    function showTextEntry() {
+      const ui = document.getElementById("ui")!;
+      ui.innerHTML = `
+        <div class="overlay"><div class="panel avatar-panel">
+          <h1>捏 个 人</h1>
+          <h2>用文字描述你的形象</h2>
+          <textarea id="av-desc" rows="4" maxlength="2000" placeholder="例：穿绿铠甲的骑士，短发，手持长剑…（≤2000 字）" style="width:100%;box-sizing:border-box;background:#14100e;color:#e8dcc8;border:2px solid #4a3826;font:inherit;font-size:12px;padding:6px;outline:none;resize:vertical"></textarea>
+          <div class="err" id="av-err"></div>
+          <button class="btn" id="av-go-text">生 成 形 象</button>
+          <button class="btn ghost" id="av-back">返 回</button>
+        </div></div>`;
+      const descEl = document.getElementById("av-desc") as HTMLTextAreaElement;
+      const errEl = document.getElementById("av-err")!;
+      const goBtn = document.getElementById("av-go-text") as HTMLButtonElement;
+      document.getElementById("av-back")!.onclick = () => showChoose();
+      goBtn.onclick = async () => {
+        const d = descEl.value.trim();
+        if (!d) {
+          errEl.textContent = "写点描述吧";
+          return;
+        }
+        goBtn.disabled = true;
+        errEl.textContent = "";
+        try {
+          const { job_id } = await api.generateAvatarText(d);
+          ui.innerHTML = "";
+          resolve(initial ?? DEFAULT_COLORS); // 立即入场（默认/当前形象）
+          pollAvatarInBackground(job_id); // 后台轮询，完成时 toast
+        } catch (e) {
+          errEl.textContent = (e as Error).message;
+          goBtn.disabled = false;
+        }
       };
     }
   });

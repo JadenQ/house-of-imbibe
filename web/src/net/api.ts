@@ -107,6 +107,8 @@ export const api = {
     }
     return res.json();
   },
+  generateAvatarText: (description: string) =>
+    req<{ job_id: string }>("POST", "/api/avatar/generate-text", { description }),
   pollAvatarJob: (jobId: string) => req<AvatarJobStatus>("GET", `/api/avatar/generate/${jobId}`),
   menu: () => req<MenuPayload>("GET", "/api/menu"),
   admin: {

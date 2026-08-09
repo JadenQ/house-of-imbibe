@@ -66,6 +66,14 @@ export interface AvatarJobStatus {
   error?: string;
 }
 
+/** 地图视觉背景层信息。bg_key = assets.storage_key（null = 用静态 tile 渲染兜底）。 */
+export interface MapInfo {
+  scene: string;
+  width: number;
+  height: number;
+  bg_key: string | null;
+}
+
 export interface Member {
   id: number;
   username: string;
@@ -143,12 +151,21 @@ export const api = {
     req<{ job_id: string }>("POST", "/api/avatar/generate-text", { description }),
   pollAvatarJob: (jobId: string) => req<AvatarJobStatus>("GET", `/api/avatar/generate/${jobId}`),
   menu: () => req<MenuPayload>("GET", "/api/menu"),
+  getMap: (scene: string) =>
+    req<MapInfo>("GET", `/api/map?scene=${encodeURIComponent(scene)}`),
   admin: {
     listMembers: () => req<Member[]>("GET", "/api/admin/members"),
     promote: (id: number) => req<void>("POST", `/api/admin/members/${id}/promote`),
     demote: (id: number) => req<void>("POST", `/api/admin/members/${id}/demote`),
     ban: (id: number) => req<void>("POST", `/api/admin/members/${id}/ban`),
     unban: (id: number) => req<void>("POST", `/api/admin/members/${id}/unban`),
+    getMap: (scene: string) =>
+      req<MapInfo>("GET", `/api/admin/map?scene=${encodeURIComponent(scene)}`),
+    regenerateMap: (prompt: string, scene?: string) =>
+      req<{ job_id: string }>("POST", "/api/admin/map/regenerate", {
+        prompt,
+        scene: scene ?? "bar",
+      }),
     listDecorations: (scene: string) =>
       req<Decoration[]>("GET", `/api/admin/decorations?scene=${encodeURIComponent(scene)}`),
     placeDecoration: (body: {

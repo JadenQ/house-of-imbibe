@@ -204,15 +204,17 @@ pub async fn pixellab_image_to_pixelart(
 
 /// POST /v2/create-image-pixen — synchronous. Returns PNG bytes.
 /// Minimal body: only `description` + `image_size` are accepted (live API).
-pub async fn pixellab_create_image_pixen(
+/// Non-square variant for map backgrounds (e.g. 240×160).
+pub async fn pixellab_create_image_pixen_wh(
     http: &Client,
     key: &str,
     description: &str,
-    out_size: u32,
+    width: u32,
+    height: u32,
 ) -> Result<Vec<u8>> {
     let body = json!({
         "description": description,
-        "image_size": {"width": out_size, "height": out_size},
+        "image_size": {"width": width, "height": height},
     });
     let resp: PixelImageResponse = http
         .post(format!("{PIXELLAB_BASE}/create-image-pixen"))
@@ -224,6 +226,16 @@ pub async fn pixellab_create_image_pixen(
         .json()
         .await?;
     Ok(B64.decode(&resp.image.base64)?)
+}
+
+/// Square-size convenience wrapper (delegates to the non-square variant).
+pub async fn pixellab_create_image_pixen(
+    http: &Client,
+    key: &str,
+    description: &str,
+    out_size: u32,
+) -> Result<Vec<u8>> {
+    pixellab_create_image_pixen_wh(http, key, description, out_size, out_size).await
 }
 
 /// POST /v2/create-character-with-4-directions — async.

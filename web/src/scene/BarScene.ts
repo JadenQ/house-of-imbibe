@@ -5,7 +5,7 @@
 import Phaser from "phaser";
 import { BAR_MAP, TILE, renderMap } from "../game/tiles";
 import { prepareCharacterSheet, DIRS, FRAME_W, FRAME_H, type Dir } from "../game/character";
-import type { AvatarData } from "../net/api";
+import { api, type AvatarData } from "../net/api";
 import type { Transport } from "../net/transport";
 import { parseMsg, msg } from "../protocol/types";
 import { initialRoomState, applyServerMsg, interpolate } from "../game-state/room";
@@ -56,6 +56,7 @@ export class BarScene extends Phaser.Scene {
   private decorationSprites: Map<string, Phaser.GameObjects.Image> = new Map();
   private decTexCache: Map<string, string> = new Map(); // asset_key -> texKey
   private decTexLoading: Set<string> = new Set();
+  private staticMapImage?: Phaser.GameObjects.Image;
 
   constructor() {
     super("bar");
@@ -68,10 +69,13 @@ export class BarScene extends Phaser.Scene {
   }
 
   async create() {
-    // 地图背景：整图单纹理（depth=-10 确保在 z_layer<0 装饰之下）
+    // 地图背景：静态 tile 兜底（depth=-10 确保在 z_layer<0 装饰之下）
     const mapCanvas = renderMap(BAR_MAP);
     this.textures.addCanvas("bar-map", mapCanvas);
-    this.add.image(0, 0, "bar-map").setOrigin(0, 0).setDepth(-10);
+    this.staticMapImage = this.add.image(0, 0, "bar-map").setOrigin(0, 0).setDepth(-10);
+
+    // 异步拉生成的背景图（bg_key 非空 → depth=-20 替代静态 tile；加载前用静态 tile 兜底）
+    this.loadMapBackground();
 
     // 占位装饰纹理（半透明色块 + 边框，表明「占位装饰」）
     const phCanvas = document.createElement("canvas");
@@ -126,6 +130,38 @@ export class BarScene extends Phaser.Scene {
         tex.add(`d${row}f${f}`, 0, f * FRAME_W, row * FRAME_H, FRAME_W, FRAME_H);
       }
     });
+  }
+
+  /** 异步拉 GET /api/map?scene=bar → bg_key 非空时加载生成的背景 PNG。 */
+  private loadMapBackground(): void {
+    api
+      .getMap("bar")
+      .then((info) => {
+        if (info.bg_key) this.loadBgImage(info.bg_key);
+      })
+      .catch(() => {
+        // 静默：静态 tile 兜底
+      });
+  }
+
+  /** 异步加载背景 PNG → depth=-20（在静态 tile -10 / 装饰 / 玩家之下）；加载后隐藏静态 tile。 */
+  private loadBgImage(bgKey: string): void {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        if (!this.textures.exists("bar-bg")) {
+          this.textures.addImage("bar-bg", img);
+        }
+        const w = BAR_MAP.rows[0].length * TILE;
+        const h = BAR_MAP.rows.length * TILE;
+        this.add.image(0, 0, "bar-bg").setOrigin(0, 0).setDepth(-20).setDisplaySize(w, h);
+        // 背景图就绪 → 隐藏静态 tile 兜底
+        this.staticMapImage?.setVisible(false);
+      } catch {
+        // 场景已 shutdown（异步加载期间退出）
+      }
+    };
+    img.src = `/api/assets/${bgKey}`;
   }
 
   private solidAt(px: number, py: number): boolean {

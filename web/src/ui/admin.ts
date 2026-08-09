@@ -1,6 +1,6 @@
 // ui/ — Admin 独立管理台（DOM overlay，非 Phaser）。CLAUDE.md: is_admin 才显示入口。
 // 移动端横屏优先：flex 布局、大目标、@media 堆叠。
-import { api, type Decoration, type Member } from "../net/api";
+import { api, type Decoration, type MapInfo, type Member } from "../net/api";
 
 /** HTML 转义用户名（防 XSS）。纯字符串替换，不依赖 DOM，可单测。 */
 export function escapeHtml(s: string): string {
@@ -58,7 +58,7 @@ export function showAdminConsole(onClose: () => void): void {
       btn.classList.add("active");
       const tab = (btn as HTMLElement).dataset.tab;
       if (tab === "members") void renderMembers(content);
-      else if (tab === "map") renderPlaceholder(content, "敬请期待，D1 待建");
+      else if (tab === "map") void renderMapTab(content);
       else if (tab === "decorations") void renderDecorations(content);
     });
   });
@@ -67,8 +67,74 @@ export function showAdminConsole(onClose: () => void): void {
   void renderMembers(content);
 }
 
-function renderPlaceholder(content: HTMLElement, msg: string): void {
-  content.innerHTML = `<div class="admin-placeholder">${msg}</div>`;
+/** 地图 tab：显示当前背景图（缩略图或「无背景图」）+ 重新生成表单。
+ *  生成提交后非阻塞轮询 job 状态，完成时刷新背景图。 */
+async function renderMapTab(content: HTMLElement): Promise<void> {
+  content.innerHTML = `<div class="admin-loading">加载中…</div>`;
+  let mapInfo: MapInfo;
+  try {
+    mapInfo = await api.admin.getMap("bar");
+  } catch {
+    content.innerHTML = `<div class="admin-error">加载失败</div>`;
+    return;
+  }
+
+  const bgPreview = mapInfo.bg_key
+    ? `<img class="admin-map-thumb" src="/api/assets/${encodeURIComponent(mapInfo.bg_key)}" alt="背景图" style="max-width:240px;image-rendering:pixelated;border:1px solid #555">`
+    : `<span class="admin-empty">无背景图，用静态 tile 渲染</span>`;
+
+  content.innerHTML = `
+    <div class="admin-map">
+      <h2 class="admin-section-title">地图背景（${escapeHtml(mapInfo.scene)} ${mapInfo.width}×${mapInfo.height}）</h2>
+      <div class="admin-map-bg-preview" style="margin:8px 0">${bgPreview}</div>
+      <h2 class="admin-section-title">重新生成背景</h2>
+      <form class="admin-form" id="map-regenerate-form">
+        <label>描述文字<input name="prompt" type="text" placeholder="cozy tavern interior, wooden bar counter, warm lighting..." required></label>
+        <button type="submit" class="btn">重新生成背景</button>
+      </form>
+    </div>`;
+
+  const form = content.querySelector("#map-regenerate-form") as HTMLFormElement | null;
+  if (form) {
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const fd = new FormData(form);
+      const prompt = (fd.get("prompt") as string).trim();
+      if (!prompt) return;
+      const submitBtn = form.querySelector('button[type="submit"]') as HTMLButtonElement;
+      submitBtn.disabled = true;
+      try {
+        const { job_id } = await api.admin.regenerateMap(prompt, "bar");
+        showAdminError(content, `已提交生成任务（job: ${job_id}），生成中…`);
+        void pollMapJob(content, job_id);
+      } catch (err) {
+        showAdminError(content, (err as Error).message || "提交失败");
+        submitBtn.disabled = false;
+      }
+    });
+  }
+}
+
+/** 非阻塞轮询 map_bg job 状态（复用 generation_jobs 表）。完成→刷新，失败→提示。 */
+async function pollMapJob(content: HTMLElement, jobId: string): Promise<void> {
+  for (let i = 0; i < 120; i++) {
+    await new Promise((r) => setTimeout(r, 2000));
+    try {
+      const status = await api.pollAvatarJob(jobId);
+      if (status.status === "done") {
+        showAdminError(content, "背景图生成完成！");
+        await renderMapTab(content);
+        return;
+      }
+      if (status.status === "failed") {
+        showAdminError(content, `生成失败：${status.error ?? "未知错误"}`);
+        return;
+      }
+    } catch {
+      // 忽略轮询错误，继续重试
+    }
+  }
+  showAdminError(content, "生成超时，请稍后刷新查看");
 }
 
 async function renderMembers(content: HTMLElement): Promise<void> {

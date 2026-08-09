@@ -523,7 +523,7 @@ pub async fn avatar_generate_submit(
     let state2 = state.clone();
     let jid = job_id.clone();
     tokio::spawn(async move {
-        if let Err(e) = run_avatar_job(&state2, &jid).await {
+        if let Err(e) = run_generation_job(&state2, &jid).await {
             warn!("avatar job {jid} worker error: {e}");
         }
     });
@@ -562,16 +562,17 @@ pub async fn avatar_generate_text(
     let state2 = state.clone();
     let jid = job_id.clone();
     tokio::spawn(async move {
-        if let Err(e) = run_avatar_job(&state2, &jid).await {
+        if let Err(e) = run_generation_job(&state2, &jid).await {
             warn!("avatar text job {jid} worker error: {e}");
         }
     });
     Ok((StatusCode::ACCEPTED, Json(json!({ "job_id": job_id }))).into_response())
 }
 
-/// 后台 worker：认领 pending job → 跑管线 → 下载 PNG 进 AssetStore → 存 key → 标记 done。
+/// 后台 worker：认领 pending job → 按 kind 分发 → 标记 done/failed。
 /// 无 API key → 标记 failed("not configured")，绝不 panic。
-pub async fn run_avatar_job(state: &AppState, job_id: &str) -> anyhow::Result<()> {
+/// kind='avatar' 走 avatar 管线（photo/text 双模式）；kind='map_bg' 走地图背景管线。
+pub async fn run_generation_job(state: &AppState, job_id: &str) -> anyhow::Result<()> {
     // 原子认领：UPDATE ... WHERE status='pending' RETURNING *
     let claimed: Option<(String, i64, String, String, Option<String>)> = sqlx::query_as(
         "UPDATE generation_jobs SET status='running' WHERE id=? AND status='pending'
@@ -580,7 +581,7 @@ pub async fn run_avatar_job(state: &AppState, job_id: &str) -> anyhow::Result<()
     .bind(job_id)
     .fetch_optional(&state.db)
     .await?;
-    let (_, owner_id, _, _, params_json) = match claimed {
+    let (_, owner_id, kind, _, params_json) = match claimed {
         None => return Ok(()), // 已被其他 worker 认领或不存在
         Some(c) => c,
     };
@@ -590,6 +591,23 @@ pub async fn run_avatar_job(state: &AppState, job_id: &str) -> anyhow::Result<()
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or(json!({}));
 
+    match kind.as_str() {
+        "avatar" => run_avatar_body(state, job_id, owner_id, params).await,
+        "map_bg" => run_map_bg_body(state, job_id, owner_id, params).await,
+        other => {
+            finish_job_failed(state, job_id, None, &format!("unknown kind: {other}")).await;
+        }
+    }
+    Ok(())
+}
+
+/// avatar job body：认领后的 avatar 生成逻辑（photo/text 双模式）。
+async fn run_avatar_body(
+    state: &AppState,
+    job_id: &str,
+    owner_id: i64,
+    params: serde_json::Value,
+) {
     // 分支：text 模式（description，只需 pixellab_key）vs photo 模式（photo_key，需 pixellab+minimax）
     let mode = params["mode"].as_str().unwrap_or("photo");
     let photo_key: Option<String> = if mode == "text" {
@@ -602,24 +620,25 @@ pub async fn run_avatar_job(state: &AppState, job_id: &str) -> anyhow::Result<()
         let description = params["description"].as_str().unwrap_or("").to_string();
         let Some(key) = state.pixellab_key.as_deref() else {
             finish_job_failed(state, job_id, None, "not configured").await;
-            return Ok(());
+            return;
         };
         if description.trim().is_empty() {
             finish_job_failed(state, job_id, None, "empty description").await;
-            return Ok(());
+            return;
         }
         generate_from_description(state, owner_id, &description, key).await
     } else {
         let (Some(pk), Some(mk)) = (state.pixellab_key.as_deref(), state.minimax_key.as_deref()) else {
             finish_job_failed(state, job_id, photo_key.as_deref(), "not configured").await;
-            return Ok(());
+            return;
         };
         let mime = params["mime"].as_str().unwrap_or("image/png").to_string();
         let pkey = photo_key.clone().unwrap_or_default();
-        let photo_bytes = state.assets.get(&pkey).await
-            .map_err(|e| anyhow::anyhow!("asset get photo: {e}"))?
-            .ok_or_else(|| anyhow::anyhow!("photo bytes not found for key {pkey}"))?;
-        avatar_pipeline(state, owner_id, &photo_bytes, &mime, pk, mk).await
+        match state.assets.get(&pkey).await {
+            Ok(Some(bytes)) => avatar_pipeline(state, owner_id, &bytes, &mime, pk, mk).await,
+            Ok(None) => Err(anyhow::anyhow!("photo bytes not found for key {pkey}")),
+            Err(e) => Err(anyhow::anyhow!("asset get photo: {e}")),
+        }
     };
 
     match result {
@@ -631,7 +650,8 @@ pub async fn run_avatar_job(state: &AppState, job_id: &str) -> anyhow::Result<()
             .bind(now_ts())
             .bind(job_id)
             .execute(&state.db)
-            .await?;
+            .await
+            .ok();
             if let Some(pk) = &photo_key {
                 let _ = state.assets.delete(pk).await; // 隐私：删临时照片
             }
@@ -641,7 +661,100 @@ pub async fn run_avatar_job(state: &AppState, job_id: &str) -> anyhow::Result<()
             finish_job_failed(state, job_id, photo_key.as_deref(), &e.to_string()).await;
         }
     }
-    Ok(())
+}
+
+/// map_bg job body：认领后的地图背景图生成逻辑。
+async fn run_map_bg_body(
+    state: &AppState,
+    job_id: &str,
+    owner_id: i64,
+    params: serde_json::Value,
+) {
+    let scene = params["scene"].as_str().unwrap_or("bar").to_string();
+    let prompt = params["prompt"].as_str().unwrap_or("").to_string();
+
+    let Some(key) = state.pixellab_key.as_deref() else {
+        finish_job_failed(state, job_id, None, "not configured").await;
+        return;
+    };
+    if prompt.trim().is_empty() {
+        finish_job_failed(state, job_id, None, "empty prompt").await;
+        return;
+    }
+
+    match map_bg_pipeline(state, job_id, owner_id, &scene, &prompt, key).await {
+        Ok(asset_id) => {
+            sqlx::query(
+                "UPDATE generation_jobs SET status='done', result_asset_id=?, completed_at=? WHERE id=?",
+            )
+            .bind(&asset_id)
+            .bind(now_ts())
+            .bind(job_id)
+            .execute(&state.db)
+            .await
+            .ok();
+            info!("map_bg job {job_id} done, asset_id={asset_id}");
+        }
+        Err(e) => {
+            finish_job_failed(state, job_id, None, &e.to_string()).await;
+        }
+    }
+}
+
+/// 地图背景图生成：文字 → create-image-pixen（同步）→ PNG bytes → AssetStore
+/// → INSERT assets → UPDATE maps.bg_key。返回 asset_id（generation_jobs.result_asset_id）。
+/// 240×160 适配地图逻辑分辨率；行走网格（grid.rs）不变。
+async fn map_bg_pipeline(
+    state: &AppState,
+    job_id: &str,
+    owner_id: i64,
+    scene: &str,
+    prompt: &str,
+    pixellab_key: &str,
+) -> anyhow::Result<String> {
+    // 1. 调 create-image-pixen（同步 ~30-120s，240×160 适配逻辑分辨率）
+    let full = format!(
+        "{prompt}. GBA Emerald-era 16-bit pixel art, retro game bar interior background, \
+         limited color palette, top-down 3/4 view, no characters."
+    );
+    let png_bytes = px::pixellab_create_image_pixen_wh(
+        &state.http, pixellab_key, &full, 240, 160,
+    )
+    .await?;
+
+    // 2. 存储 PNG 到 AssetStore（存 key 不存 URL）
+    let storage_key = format!("map/{scene}/{job_id}.png");
+    state
+        .assets
+        .put(&storage_key, &png_bytes)
+        .await
+        .map_err(|e| anyhow::anyhow!("asset put {storage_key}: {e}"))?;
+
+    // 3. INSERT assets 行（kind 'map_bg'）
+    let asset_id = crate::assets::random_asset_id();
+    let meta = json!({ "scene": scene, "prompt": prompt });
+    sqlx::query(
+        "INSERT INTO assets (id, owner_id, kind, storage_key, meta_json, created_at)
+         VALUES (?, ?, 'map_bg', ?, ?, ?)",
+    )
+    .bind(&asset_id)
+    .bind(owner_id)
+    .bind(&storage_key)
+    .bind(meta.to_string())
+    .bind(now_ts())
+    .execute(&state.db)
+    .await?;
+
+    // 4. UPDATE maps.bg_key（视觉背景层切换；行走网格层不变）
+    sqlx::query("UPDATE maps SET bg_key = ?, updated_at = ? WHERE scene = ?")
+        .bind(&storage_key)
+        .bind(now_ts())
+        .bind(scene)
+        .execute(&state.db)
+        .await?;
+
+    info!("map_bg pipeline done: scene={scene}, asset_id={asset_id}, key={storage_key}");
+    Ok(asset_id)
 }
 
 /// 标记 job failed + 删除临时照片（如果提供）。
@@ -766,6 +879,99 @@ pub async fn avatar_generate_poll(
     let (status, error) = row
         .ok_or(ApiError(StatusCode::NOT_FOUND, format!("no job {job_id}")))?;
     Ok(Json(AvatarJobStatus { status, error }))
+}
+
+// ---------- map（视觉背景层）----------
+
+/// GET /api/map?scene=bar 和 GET /api/admin/map?scene=bar 的查询参数。
+#[derive(Deserialize)]
+pub struct MapQuery {
+    pub scene: Option<String>,
+}
+
+/// POST /api/admin/map/regenerate 的请求体。
+#[derive(Deserialize)]
+pub struct MapRegenerateRequest {
+    pub prompt: String,
+    pub scene: Option<String>,
+}
+
+/// 查地图行 → {scene, width, height, bg_key}。不存在 → 404。
+async fn fetch_map(state: &AppState, scene: &str) -> Result<serde_json::Value, ApiError> {
+    let row: Option<(String, i64, i64, Option<String>)> = sqlx::query_as(
+        "SELECT scene, width, height, bg_key FROM maps WHERE scene = ?",
+    )
+    .bind(scene)
+    .fetch_optional(&state.db)
+    .await?;
+    let (scene, width, height, bg_key) = row
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "scene not found".into()))?;
+    Ok(json!({
+        "scene": scene,
+        "width": width,
+        "height": height,
+        "bg_key": bg_key,
+    }))
+}
+
+/// GET /api/map?scene=bar → 200 {scene, width, height, bg_key}（公开，前端 BarScene 拉 bg_key）。
+pub async fn get_map(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<MapQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let scene = q.scene.as_deref().unwrap_or("bar");
+    Ok(Json(fetch_map(&state, scene).await?))
+}
+
+/// GET /api/admin/map?scene=bar → 200 {scene, width, height, bg_key}（admin 403 门禁）。
+pub async fn admin_get_map(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<MapQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_admin(&state, &headers).await?;
+    let scene = q.scene.as_deref().unwrap_or("bar");
+    Ok(Json(fetch_map(&state, scene).await?))
+}
+
+/// POST /api/admin/map/regenerate {prompt, scene?} → 202 {job_id}（admin 403 门禁）。
+/// 禁令#1：handler 内不 await 生成调用。INSERT generation_jobs(kind='map_bg', pending) → spawn worker。
+pub async fn admin_map_regenerate(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<MapRegenerateRequest>,
+) -> Result<Response, ApiError> {
+    let admin_id = require_admin(&state, &headers).await?;
+    let prompt = body.prompt.trim();
+    if prompt.is_empty() {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "prompt required".into()));
+    }
+    if prompt.chars().count() > 2000 {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "prompt too long (max 2000 chars)".into()));
+    }
+    let scene = body.scene.as_deref().unwrap_or("bar");
+    let job_id = crate::assets::random_asset_id();
+    let params = json!({ "scene": scene, "prompt": prompt });
+    sqlx::query(
+        "INSERT INTO generation_jobs (id, owner_id, kind, status, params_json, created_at)
+         VALUES (?, ?, 'map_bg', 'pending', ?, ?)",
+    )
+    .bind(&job_id)
+    .bind(admin_id)
+    .bind(params.to_string())
+    .bind(now_ts())
+    .execute(&state.db)
+    .await?;
+
+    let state2 = state.clone();
+    let jid = job_id.clone();
+    tokio::spawn(async move {
+        if let Err(e) = run_generation_job(&state2, &jid).await {
+            warn!("map_bg job {jid} worker error: {e}");
+        }
+    });
+
+    Ok((StatusCode::ACCEPTED, Json(json!({ "job_id": job_id }))).into_response())
 }
 
 // ---------- 资产服务 ----------
@@ -1046,6 +1252,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/members/{id}/demote", post(admin_demote))
         .route("/members/{id}/ban", post(admin_ban))
         .route("/members/{id}/unban", post(admin_unban))
+        .route("/map", get(admin_get_map))
+        .route("/map/regenerate", post(admin_map_regenerate))
         .route(
             "/decorations",
             get(admin_list_decorations).post(admin_place_decoration),
@@ -1065,6 +1273,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/avatar/generate/{job_id}", get(avatar_generate_poll))
         .route("/assets/{key}", get(serve_asset))
         .route("/menu", get(get_menu))
+        .route("/map", get(get_map))
         .route("/health", get(health))
         .nest("/admin", admin)
         .layer(DefaultBodyLimit::max(20 * 1024 * 1024));

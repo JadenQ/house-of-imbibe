@@ -34,6 +34,16 @@ async fn main() {
     .expect("connect sqlite");
     sqlx::migrate!("./migrations").run(&db).await.expect("migrations");
 
+    // Belt-and-suspenders: 确保 bar 场景行存在（迁移里也有 INSERT OR IGNORE）。
+    sqlx::query(
+        "INSERT OR IGNORE INTO maps (scene, width, height, bg_key, updated_at)
+         VALUES ('bar', 15, 10, NULL, ?)",
+    )
+    .bind(house_of_imbibe::now_ts())
+    .execute(&db)
+    .await
+    .expect("seed bar map");
+
     let asset_root = std::env::var("ASSET_DIR").unwrap_or_else(|_| "data/assets".into());
     std::fs::create_dir_all(&asset_root).ok();
 

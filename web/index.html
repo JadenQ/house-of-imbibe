@@ -88,12 +88,21 @@
     .admin-loading { text-align: center; padding: 20px; color: #9a8a70; }
     .admin-error { text-align: center; padding: 20px; color: #e06c5a; }
     .admin-error-inline { color: #e06c5a; font-size: 11px; padding: 4px 0 8px; }
+    /* 装饰 tab：表单 + 空态 */
+    .admin-section-title { font-size: 12px; color: var(--accent); letter-spacing: 1px;
+      margin: 14px 0 8px; }
+    .admin-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; }
+    .admin-form label { flex: 1; min-width: 70px; }
+    .admin-form .btn { width: auto; flex: 0 0 auto; margin-top: 0; }
+    .admin-empty { text-align: center; color: #9a8a60; padding: 16px 0; }
     @media (max-width: 500px) {
       .admin-panel { min-width: 0; width: 95vw; padding: 10px 12px; }
       .admin-table { font-size: 11px; }
       .admin-table th, .admin-table td { padding: 6px 2px; }
       .admin-actions { flex-direction: column; }
       .admin-actions .btn { width: 100%; }
+      .admin-form { flex-direction: column; }
+      .admin-form .btn { width: 100%; }
     }
   </style>
 </head>

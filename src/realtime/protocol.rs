@@ -103,7 +103,7 @@ pub enum ServerMsg {
     },
     DecorationRemoved {
         v: u8,
-        id: u64,
+        id: String,
     },
     SceneChanged {
         v: u8,

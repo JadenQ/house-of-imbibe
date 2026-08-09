@@ -23,10 +23,10 @@ use argon2::password_hash::rand_core::{OsRng, RngCore};
 use argon2::password_hash::{PasswordHash, PasswordHasher, SaltString, PasswordVerifier};
 use argon2::Argon2;
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Multipart, Path, State};
+use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -759,6 +759,118 @@ pub async fn admin_unban(
     admin_update_member(&state, &headers, target_id, "UPDATE users SET banned = 0 WHERE id = ?").await
 }
 
+// ---------- admin（装饰管理）----------
+
+/// GET /api/admin/decorations?scene=bar 的查询参数。
+#[derive(Deserialize)]
+pub struct DecorationSceneQuery {
+    pub scene: Option<String>,
+}
+
+/// GET /api/admin/decorations?scene=bar → 200 [装饰 json]（按 created_at 排序）。
+pub async fn admin_list_decorations(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<DecorationSceneQuery>,
+) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
+    require_admin(&state, &headers).await?;
+    let scene = q.scene.as_deref().unwrap_or("bar");
+    let rows = sqlx::query_as::<_, (String, String, i64, i64, Option<String>, i64, i64)>(
+        "SELECT id, scene, tile_x, tile_y, asset_id, z_layer, placed_by
+         FROM decorations WHERE scene = ? ORDER BY created_at",
+    )
+    .bind(scene)
+    .fetch_all(&state.db)
+    .await?;
+    let decorations = rows
+        .iter()
+        .map(|(id, scene, tx, ty, aid, z, pb)| {
+            json!({
+                "id": id,
+                "scene": scene,
+                "tile_x": tx,
+                "tile_y": ty,
+                "asset_id": aid,
+                "z_layer": z,
+                "placed_by": pb,
+            })
+        })
+        .collect();
+    Ok(Json(decorations))
+}
+
+/// POST /api/admin/decorations {scene, tile_x, tile_y, asset_id?, z_layer?} → 201 {装饰}。
+/// INSERT + 广播 DecorationAdded。asset_id 可 null（占位装饰）。
+#[derive(Deserialize)]
+pub struct DecorationPut {
+    pub scene: String,
+    pub tile_x: i64,
+    pub tile_y: i64,
+    pub asset_id: Option<String>,
+    pub z_layer: Option<i64>,
+}
+
+pub async fn admin_place_decoration(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<DecorationPut>,
+) -> Result<Response, ApiError> {
+    let admin_id = require_admin(&state, &headers).await?;
+    let id = crate::assets::random_asset_id();
+    let z_layer = body.z_layer.unwrap_or(0);
+    let created_at = now_ts();
+    sqlx::query(
+        "INSERT INTO decorations (id, scene, tile_x, tile_y, asset_id, z_layer, placed_by, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(&body.scene)
+    .bind(body.tile_x)
+    .bind(body.tile_y)
+    .bind(&body.asset_id)
+    .bind(z_layer)
+    .bind(admin_id)
+    .bind(created_at)
+    .execute(&state.db)
+    .await?;
+    let decoration = json!({
+        "id": id,
+        "scene": body.scene,
+        "tile_x": body.tile_x,
+        "tile_y": body.tile_y,
+        "asset_id": body.asset_id,
+        "z_layer": z_layer,
+        "placed_by": admin_id,
+    });
+    // 广播 DecorationAdded（若房间存在且有在线玩家才到达；否则 DB 持有，下次 snapshot_full 查到）
+    state.rt.add_decoration(&body.scene, decoration.clone());
+    Ok((StatusCode::CREATED, Json(decoration)).into_response())
+}
+
+/// DELETE /api/admin/decorations/{id} → 204；广播 DecorationRemoved + DELETE。
+pub async fn admin_remove_decoration(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    require_admin(&state, &headers).await?;
+    // 先查 scene（广播需要），再 DELETE
+    let row: Option<(String,)> = sqlx::query_as("SELECT scene FROM decorations WHERE id = ?")
+        .bind(&id)
+        .fetch_optional(&state.db)
+        .await?;
+    let scene = match row {
+        Some((s,)) => s,
+        None => return Err(ApiError(StatusCode::NOT_FOUND, "decoration not found".into())),
+    };
+    sqlx::query("DELETE FROM decorations WHERE id = ?")
+        .bind(&id)
+        .execute(&state.db)
+        .await?;
+    state.rt.remove_decoration(&scene, id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // ---------- router ----------
 
 /// 构建 HTTP 路由（与原 main.rs 完全一致）。
@@ -770,7 +882,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/members/{id}/promote", post(admin_promote))
         .route("/members/{id}/demote", post(admin_demote))
         .route("/members/{id}/ban", post(admin_ban))
-        .route("/members/{id}/unban", post(admin_unban));
+        .route("/members/{id}/unban", post(admin_unban))
+        .route(
+            "/decorations",
+            get(admin_list_decorations).post(admin_place_decoration),
+        )
+        .route("/decorations/{id}", delete(admin_remove_decoration));
 
     let api = Router::new()
         .route("/register", post(register))

@@ -60,6 +60,18 @@ export interface Member {
   banned: boolean;
 }
 
+/** 装饰对象 JSON 契约（广播 + 快照 + API 返回一致）。
+ *  asset_id 可 null = 占位装饰（无关联资产）。 */
+export interface Decoration {
+  id: string;
+  scene: string;
+  tile_x: number;
+  tile_y: number;
+  asset_id: string | null;
+  z_layer: number;
+  placed_by: number;
+}
+
 async function req<T>(method: string, url: string, body?: unknown): Promise<T> {
   const res = await fetch(url, {
     method,
@@ -117,5 +129,15 @@ export const api = {
     demote: (id: number) => req<void>("POST", `/api/admin/members/${id}/demote`),
     ban: (id: number) => req<void>("POST", `/api/admin/members/${id}/ban`),
     unban: (id: number) => req<void>("POST", `/api/admin/members/${id}/unban`),
+    listDecorations: (scene: string) =>
+      req<Decoration[]>("GET", `/api/admin/decorations?scene=${encodeURIComponent(scene)}`),
+    placeDecoration: (body: {
+      scene: string;
+      tile_x: number;
+      tile_y: number;
+      asset_id?: string;
+      z_layer?: number;
+    }) => req<Decoration>("POST", "/api/admin/decorations", body),
+    removeDecoration: (id: string) => req<void>("DELETE", `/api/admin/decorations/${id}`),
   },
 };

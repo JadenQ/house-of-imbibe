@@ -37,6 +37,7 @@ pub async fn ws_room(
     };
 
     let rt = state.rt.clone();
+    let db = state.db.clone();
     let my_name = name.clone();
     let (room, mut dir_rx, mut bcast_rx, mut chat_rx, pid) = rt.enter(uid, name, avatar).await;
 
@@ -55,8 +56,8 @@ pub async fn ws_room(
         server_time: now_ms(),
     });
     // 连接即发全量快照（dev-plan AC：on connect sends a full snapshot）——
-    // 让新人看到当前所有玩家；否则静止的远端玩家永远看不到。
-    let _ = dir_tx.send(room.snapshot_full(pid));
+    // 让新人看到当前所有玩家 + 已有装饰；否则静止的远端玩家永远看不到。
+    let _ = dir_tx.send(room.snapshot_full(pid, &state.db).await);
     let _ = dir_tx.send(ServerMsg::ChatBacklog {
         v: 1,
         items: rt.chat_backlog(),
@@ -72,7 +73,7 @@ pub async fn ws_room(
                         if ws_tx.send(Message::Text(txt.into())).await.is_err() { break; }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        let _ = dir_tx.send(room.snapshot_full(pid));
+                        let _ = dir_tx.send(room.snapshot_full(pid, &db).await);
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 },

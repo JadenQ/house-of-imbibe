@@ -61,7 +61,7 @@ impl RealtimeState {
         let room = {
             let entry = self.rooms.entry(Self::BAR).or_insert_with(|| {
                 let grid: Arc<dyn WalkGrid> = Arc::new(BarGrid::parse());
-                Arc::new(Room::new(grid))
+                Arc::new(Room::new(Self::BAR.to_string(), grid))
             });
             Arc::clone(entry.value())
         };
@@ -142,6 +142,25 @@ impl RealtimeState {
             upsert: vec![],
             remove: vec![pid],
         });
+    }
+
+    /// admin 放置装饰：更新房间 decorations + 广播 DecorationAdded。
+    /// 若房间尚未创建（无在线玩家），仅 DB 持有；下次 snapshot_full 会查到。
+    pub fn add_decoration(&self, scene: &str, decoration: serde_json::Value) {
+        if scene == Self::BAR {
+            if let Some(r) = self.rooms.get(Self::BAR) {
+                r.add_decoration(decoration);
+            }
+        }
+    }
+
+    /// admin 移除装饰：更新房间 decorations + 广播 DecorationRemoved。
+    pub fn remove_decoration(&self, scene: &str, id: String) {
+        if scene == Self::BAR {
+            if let Some(r) = self.rooms.get(Self::BAR) {
+                r.remove_decoration(id);
+            }
+        }
     }
 
     pub fn chat_backlog(&self) -> Vec<ChatItem> {

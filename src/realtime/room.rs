@@ -6,10 +6,11 @@
 //! - 绝不持 DashMap ref 跨 .await：先 upgrade() 拿 Arc<Room>，drop entry ref。
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use dashmap::DashMap;
+use sqlx::SqlitePool;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::{interval, MissedTickBehavior};
@@ -33,6 +34,7 @@ pub struct PlayerState {
 }
 
 pub struct Room {
+    pub scene: String,
     pub grid: Arc<dyn WalkGrid>,
     pub players: DashMap<PlayerId, PlayerState>,
     pub broadcast_tx: broadcast::Sender<ServerMsg>,
@@ -40,12 +42,15 @@ pub struct Room {
     pub tick_alive: AtomicBool,
     pub last_broadcast_rev: AtomicU64,
     pub tick: AtomicU64,
+    /// 装饰对象层（内存缓存；DB 为真相源，snapshot_full 从 DB 查）。
+    pub decorations: Mutex<Vec<serde_json::Value>>,
 }
 
 impl Room {
-    pub fn new(grid: Arc<dyn WalkGrid>) -> Self {
+    pub fn new(scene: String, grid: Arc<dyn WalkGrid>) -> Self {
         let (broadcast_tx, _) = broadcast::channel(BROADCAST_CAP);
         Self {
+            scene,
             grid,
             players: DashMap::new(),
             broadcast_tx,
@@ -53,6 +58,7 @@ impl Room {
             tick_alive: AtomicBool::new(false),
             last_broadcast_rev: AtomicU64::new(0),
             tick: AtomicU64::new(0),
+            decorations: Mutex::new(Vec::new()),
         }
     }
 
@@ -75,18 +81,44 @@ impl Room {
         Some(Self::snap_from(&p))
     }
 
-    pub fn snapshot_full(&self, _self_id: u64) -> ServerMsg {
+    pub async fn snapshot_full(&self, _self_id: u64, db: &SqlitePool) -> ServerMsg {
         let players: Vec<PlayerSnap> = self
             .players
             .iter()
             .map(|e| Self::snap_from(e.value()))
             .collect();
+        let tick = self.tick.load(Ordering::Relaxed);
+        // 从 DB 查该 scene 的装饰（晚加入者能看到已有装饰；空时不破坏现有 spine 测试）
+        let decorations: Vec<serde_json::Value> =
+            sqlx::query_as::<_, (String, String, i64, i64, Option<String>, i64, i64)>(
+                "SELECT id, scene, tile_x, tile_y, asset_id, z_layer, placed_by
+                 FROM decorations WHERE scene = ? ORDER BY created_at",
+            )
+            .bind(&self.scene)
+            .fetch_all(db)
+            .await
+            .map(|rows| {
+                rows.iter()
+                    .map(|(id, scene, tx, ty, aid, z, pb)| {
+                        serde_json::json!({
+                            "id": id,
+                            "scene": scene,
+                            "tile_x": tx,
+                            "tile_y": ty,
+                            "asset_id": aid,
+                            "z_layer": z,
+                            "placed_by": pb,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         ServerMsg::SnapshotFull {
             v: 1,
-            tick: self.tick.load(Ordering::Relaxed),
+            tick,
             t: now_ms(),
             players,
-            decorations: vec![],
+            decorations,
             npcs: vec![],
         }
     }
@@ -114,6 +146,35 @@ impl Room {
             },
             max_rev,
         )
+    }
+
+    /// admin 放置装饰：更新内存列表 + 广播 DecorationAdded。
+    pub fn add_decoration(&self, decoration: serde_json::Value) {
+        {
+            let mut decs = self.decorations.lock().unwrap();
+            decs.push(decoration.clone());
+        } // lock 释放后再 broadcast（broadcast::send 非阻塞）
+        let _ = self.broadcast_tx.send(ServerMsg::DecorationAdded {
+            v: 1,
+            decoration,
+        });
+    }
+
+    /// admin 移除装饰：更新内存列表 + 广播 DecorationRemoved。
+    pub fn remove_decoration(&self, id: String) {
+        {
+            let target = id.as_str();
+            let mut decs = self.decorations.lock().unwrap();
+            decs.retain(|d| {
+                d.get("id")
+                    .and_then(|v| v.as_str())
+                    != Some(target)
+            });
+        }
+        let _ = self.broadcast_tx.send(ServerMsg::DecorationRemoved {
+            v: 1,
+            id,
+        });
     }
 }
 

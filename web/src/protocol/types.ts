@@ -84,7 +84,7 @@ export type ServerMsg =
   | { v: number; type: "chat_backlog"; items: ChatItem[] }
   | { v: number; type: "dialogue"; npc: string; node: string; menu?: unknown }
   | { v: number; type: "decoration_added"; decoration: unknown }
-  | { v: number; type: "decoration_removed"; id: number }
+  | { v: number; type: "decoration_removed"; id: string }
   | { v: number; type: "scene_changed"; scene: string; spawn: [number, number] }
   | { v: number; type: "kicked"; reason: string }
   | { v: number; type: "error"; code: string; msg: string }

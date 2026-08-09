@@ -40,6 +40,21 @@ export interface ChatItem {
   ts: number;
 }
 
+/** 装饰对象 JSON 契约（广播 + 快照 + API 返回一致）。
+ *  asset_id 可 null = 占位装饰（无关联资产）。
+ *  asset_key = LEFT JOIN assets.storage_key；null = 无资产 / 资产不存在。
+ *  前端拼 /api/assets/{asset_key} 取 PNG 的唯一来源。 */
+export interface Decoration {
+  id: string;
+  scene: string;
+  tile_x: number;
+  tile_y: number;
+  asset_id: string | null;
+  asset_key: string | null;
+  z_layer: number;
+  placed_by: number;
+}
+
 export type ClientMsg =
   | { v: number; type: "move"; tx: number; ty: number }
   | { v: number; type: "chat"; text: string }
@@ -62,7 +77,7 @@ export type ServerMsg =
       tick: number;
       t: number;
       players: PlayerSnap[];
-      decorations: unknown[];
+      decorations: Decoration[];
       npcs: unknown[];
     }
   | {
@@ -83,7 +98,7 @@ export type ServerMsg =
     }
   | { v: number; type: "chat_backlog"; items: ChatItem[] }
   | { v: number; type: "dialogue"; npc: string; node: string; menu?: unknown }
-  | { v: number; type: "decoration_added"; decoration: unknown }
+  | { v: number; type: "decoration_added"; decoration: Decoration }
   | { v: number; type: "decoration_removed"; id: string }
   | { v: number; type: "scene_changed"; scene: string; spawn: [number, number] }
   | { v: number; type: "kicked"; reason: string }

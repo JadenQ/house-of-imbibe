@@ -89,23 +89,27 @@ impl Room {
             .collect();
         let tick = self.tick.load(Ordering::Relaxed);
         // 从 DB 查该 scene 的装饰（晚加入者能看到已有装饰；空时不破坏现有 spine 测试）
+        // asset_key = LEFT JOIN assets.storage_key（无资产 → null）；不落库，join 出来。
         let decorations: Vec<serde_json::Value> =
-            sqlx::query_as::<_, (String, String, i64, i64, Option<String>, i64, i64)>(
-                "SELECT id, scene, tile_x, tile_y, asset_id, z_layer, placed_by
-                 FROM decorations WHERE scene = ? ORDER BY created_at",
+            sqlx::query_as::<_, (String, String, i64, i64, Option<String>, i64, i64, Option<String>)>(
+                "SELECT d.id, d.scene, d.tile_x, d.tile_y, d.asset_id, d.z_layer, d.placed_by, a.storage_key
+                 FROM decorations d
+                 LEFT JOIN assets a ON d.asset_id = a.id
+                 WHERE d.scene = ? ORDER BY d.created_at",
             )
             .bind(&self.scene)
             .fetch_all(db)
             .await
             .map(|rows| {
                 rows.iter()
-                    .map(|(id, scene, tx, ty, aid, z, pb)| {
+                    .map(|(id, scene, tx, ty, aid, z, pb, akey)| {
                         serde_json::json!({
                             "id": id,
                             "scene": scene,
                             "tile_x": tx,
                             "tile_y": ty,
                             "asset_id": aid,
+                            "asset_key": akey,
                             "z_layer": z,
                             "placed_by": pb,
                         })

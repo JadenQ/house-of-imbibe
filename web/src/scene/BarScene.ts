@@ -53,6 +53,9 @@ export class BarScene extends Phaser.Scene {
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private lastSendAt = 0;
   private touch?: TouchControls;
+  private decorationSprites: Map<string, Phaser.GameObjects.Image> = new Map();
+  private decTexCache: Map<string, string> = new Map(); // asset_key -> texKey
+  private decTexLoading: Set<string> = new Set();
 
   constructor() {
     super("bar");
@@ -65,10 +68,22 @@ export class BarScene extends Phaser.Scene {
   }
 
   async create() {
-    // 地图背景：整图单纹理
+    // 地图背景：整图单纹理（depth=-10 确保在 z_layer<0 装饰之下）
     const mapCanvas = renderMap(BAR_MAP);
     this.textures.addCanvas("bar-map", mapCanvas);
-    this.add.image(0, 0, "bar-map").setOrigin(0, 0);
+    this.add.image(0, 0, "bar-map").setOrigin(0, 0).setDepth(-10);
+
+    // 占位装饰纹理（半透明色块 + 边框，表明「占位装饰」）
+    const phCanvas = document.createElement("canvas");
+    phCanvas.width = TILE;
+    phCanvas.height = TILE;
+    const pctx = phCanvas.getContext("2d")!;
+    pctx.fillStyle = "rgba(255, 215, 0, 0.25)";
+    pctx.fillRect(0, 0, TILE, TILE);
+    pctx.strokeStyle = "rgba(255, 215, 0, 0.7)";
+    pctx.lineWidth = 1;
+    pctx.strokeRect(0.5, 0.5, TILE - 1, TILE - 1);
+    this.textures.addCanvas("deco-placeholder", phCanvas);
 
     // 本地玩家 sheet（装载层，不分支 kind）
     const sheet = await prepareCharacterSheet(this.avatarData);
@@ -277,6 +292,9 @@ export class BarScene extends Phaser.Scene {
       }
     }
 
+    // ── 装饰渲染（来自 RenderView.decorations；asset_key 非空→按 /api/assets/{key} 取 PNG，null→占位）──
+    this.renderDecorations(view);
+
     // ── 聊天气泡（每人最新一条，仍在 4s TTL 内即显示）──
     this.renderBubbles(view);
 
@@ -342,6 +360,77 @@ export class BarScene extends Phaser.Scene {
     }
     for (const [pid, t] of this.bubbleTexts) {
       if (!active.has(pid)) t.setVisible(false);
+    }
+  }
+
+  /** 异步装载装饰纹理（按 asset_key 缓存；Image 元素 → textures.addImage）。 */
+  private loadDecTex(assetKey: string): void {
+    if (this.decTexCache.has(assetKey) || this.decTexLoading.has(assetKey)) return;
+    this.decTexLoading.add(assetKey);
+    const texKey = `dec_${assetKey.replace(/[^a-zA-Z0-9_]/g, "_")}`;
+    const img = new Image();
+    img.onload = () => {
+      if (!this.textures.exists(texKey)) {
+        this.textures.addImage(texKey, img);
+      }
+      this.decTexCache.set(assetKey, texKey);
+      this.decTexLoading.delete(assetKey);
+    };
+    img.onerror = () => {
+      this.decTexLoading.delete(assetKey);
+    };
+    img.src = `/api/assets/${assetKey}`;
+  }
+
+  /** 渲染装饰对象：asset_key 非空→异步装 PNG 纹理 + drawImage；null→占位色块。
+   *  depth：z_layer<0 设 y-1（玩家下方），z_layer>=0 设 y+1000（玩家上方）。 */
+  private renderDecorations(view: RenderView) {
+    const seen = new Set<string>();
+    for (const dec of view.decorations) {
+      seen.add(dec.id);
+      let spr = this.decorationSprites.get(dec.id);
+      if (dec.asset_key) {
+        // 异步装载纹理（按 asset_key 缓存，复用 sheetCache 模式）
+        if (!this.decTexCache.has(dec.asset_key) && !this.decTexLoading.has(dec.asset_key)) {
+          this.loadDecTex(dec.asset_key);
+        }
+        const texKey = this.decTexCache.get(dec.asset_key);
+        if (texKey && this.textures.exists(texKey)) {
+          if (!spr) {
+            spr = this.add.image(dec.x, dec.y, texKey).setOrigin(0, 0);
+            this.decorationSprites.set(dec.id, spr);
+          } else if (spr.texture.key !== texKey) {
+            spr.setTexture(texKey);
+          }
+          spr.setPosition(dec.x, dec.y);
+          spr.setOrigin(0, 0);
+          spr.setVisible(true);
+        } else {
+          // 纹理未就绪：创建/复用占位 sprite（隐），等纹理就绪后替换
+          if (!spr) {
+            spr = this.add.image(dec.x, dec.y, "deco-placeholder").setOrigin(0, 0).setVisible(false);
+            this.decorationSprites.set(dec.id, spr);
+          }
+        }
+      } else {
+        // asset_key 为 null → 占位标记（半透明色块 + 边框）
+        if (!spr) {
+          spr = this.add.image(dec.x, dec.y, "deco-placeholder").setOrigin(0, 0);
+          this.decorationSprites.set(dec.id, spr);
+        }
+        spr.setPosition(dec.x, dec.y);
+        spr.setOrigin(0, 0);
+        spr.setVisible(true);
+      }
+      // z_layer<0 在玩家下方（地板/地毯）；>=0 在玩家上方（墙上挂画/头顶吊灯）
+      spr.setDepth(dec.z_layer < 0 ? dec.y - 1 : dec.y + 1000);
+    }
+    // 清除离开视野的装饰 sprite
+    for (const [id, spr] of this.decorationSprites) {
+      if (!seen.has(id)) {
+        spr.destroy();
+        this.decorationSprites.delete(id);
+      }
     }
   }
 

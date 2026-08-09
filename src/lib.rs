@@ -768,6 +768,7 @@ pub struct DecorationSceneQuery {
 }
 
 /// GET /api/admin/decorations?scene=bar → 200 [装饰 json]（按 created_at 排序）。
+/// asset_key = LEFT JOIN assets.storage_key（无资产 → null）；不落库，join 出来。
 pub async fn admin_list_decorations(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -775,22 +776,25 @@ pub async fn admin_list_decorations(
 ) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
     require_admin(&state, &headers).await?;
     let scene = q.scene.as_deref().unwrap_or("bar");
-    let rows = sqlx::query_as::<_, (String, String, i64, i64, Option<String>, i64, i64)>(
-        "SELECT id, scene, tile_x, tile_y, asset_id, z_layer, placed_by
-         FROM decorations WHERE scene = ? ORDER BY created_at",
+    let rows = sqlx::query_as::<_, (String, String, i64, i64, Option<String>, i64, i64, Option<String>)>(
+        "SELECT d.id, d.scene, d.tile_x, d.tile_y, d.asset_id, d.z_layer, d.placed_by, a.storage_key
+         FROM decorations d
+         LEFT JOIN assets a ON d.asset_id = a.id
+         WHERE d.scene = ? ORDER BY d.created_at",
     )
     .bind(scene)
     .fetch_all(&state.db)
     .await?;
     let decorations = rows
         .iter()
-        .map(|(id, scene, tx, ty, aid, z, pb)| {
+        .map(|(id, scene, tx, ty, aid, z, pb, akey)| {
             json!({
                 "id": id,
                 "scene": scene,
                 "tile_x": tx,
                 "tile_y": ty,
                 "asset_id": aid,
+                "asset_key": akey,
                 "z_layer": z,
                 "placed_by": pb,
             })
@@ -833,12 +837,22 @@ pub async fn admin_place_decoration(
     .bind(created_at)
     .execute(&state.db)
     .await?;
+    // 查 asset_key（LEFT JOIN 出来的字段；无资产 → null）。前端拼 /api/assets/{asset_key} 的唯一来源。
+    let asset_key: Option<String> = match &body.asset_id {
+        Some(aid) => sqlx::query_as::<_, (String,)>("SELECT storage_key FROM assets WHERE id = ?")
+            .bind(aid)
+            .fetch_optional(&state.db)
+            .await?
+            .map(|(s,)| s),
+        None => None,
+    };
     let decoration = json!({
         "id": id,
         "scene": body.scene,
         "tile_x": body.tile_x,
         "tile_y": body.tile_y,
         "asset_id": body.asset_id,
+        "asset_key": asset_key,
         "z_layer": z_layer,
         "placed_by": admin_id,
     });

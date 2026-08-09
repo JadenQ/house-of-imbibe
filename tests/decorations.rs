@@ -264,3 +264,76 @@ async fn decoration_delete_not_found() {
         "delete nonexistent must be 404"
     );
 }
+
+/// 放置带真 asset 行的装饰 → POST + GET 返回 asset_key 非空（= LEFT JOIN assets.storage_key）。
+#[tokio::test]
+async fn decoration_with_asset_returns_asset_key() {
+    let app = spawn_app().await;
+    let base = &app.base_url;
+
+    let admin_cookie = register_and_login(base, "alice").await; // admin (user id = 1)
+
+    // 插入一行 asset（storage_key = "deco/test.png"）
+    let asset_id = "test_asset_001";
+    sqlx::query(
+        "INSERT INTO assets (id, owner_id, kind, storage_key, meta_json, created_at)
+         VALUES (?, 1, 'decoration', 'deco/test.png', NULL, ?)",
+    )
+    .bind(asset_id)
+    .bind(house_of_imbibe::now_ts())
+    .execute(&app.db)
+    .await
+    .expect("insert asset");
+
+    // 放置装饰（asset_id 指向上面插入的行）
+    let (status, json) = req(
+        base,
+        "POST",
+        "/api/admin/decorations",
+        &admin_cookie,
+        Some(&serde_json::json!({
+            "scene": "bar",
+            "tile_x": 3,
+            "tile_y": 4,
+            "asset_id": asset_id,
+            "z_layer": 1,
+        })),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::CREATED);
+    assert_eq!(json["asset_id"], asset_id);
+    assert_eq!(
+        json["asset_key"], "deco/test.png",
+        "asset_key must be storage_key from LEFT JOIN assets"
+    );
+
+    // GET 列表 → asset_key 非空
+    let (status, list_json) = req(
+        base,
+        "GET",
+        "/api/admin/decorations?scene=bar",
+        &admin_cookie,
+        None,
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    let arr = list_json.as_array().expect("array");
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["asset_key"], "deco/test.png");
+
+    // 占位装饰（asset_id=null）→ asset_key 也 null
+    let (status, json2) = req(
+        base,
+        "POST",
+        "/api/admin/decorations",
+        &admin_cookie,
+        Some(&serde_json::json!({
+            "scene": "bar",
+            "tile_x": 0,
+            "tile_y": 0,
+        })),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::CREATED);
+    assert!(json2["asset_key"].is_null(), "asset_key null for placeholder");
+}

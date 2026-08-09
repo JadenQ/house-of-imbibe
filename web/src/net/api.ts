@@ -61,13 +61,16 @@ export interface Member {
 }
 
 /** 装饰对象 JSON 契约（广播 + 快照 + API 返回一致）。
- *  asset_id 可 null = 占位装饰（无关联资产）。 */
+ *  asset_id 可 null = 占位装饰（无关联资产）。
+ *  asset_key = LEFT JOIN assets.storage_key；null = 无资产 / 资产不存在。
+ *  前端拼 /api/assets/{asset_key} 取 PNG 的唯一来源。 */
 export interface Decoration {
   id: string;
   scene: string;
   tile_x: number;
   tile_y: number;
   asset_id: string | null;
+  asset_key: string | null;
   z_layer: number;
   placed_by: number;
 }

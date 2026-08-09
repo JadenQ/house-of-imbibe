@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 import { applyServerMsg, avatarHashOf, initialRoomState, interpolate } from "./room";
-import type { PlayerSnap } from "../protocol/types";
+import type { Decoration, PlayerSnap } from "../protocol/types";
 
 const AV = { kind: "modular", skin: "#000000", hair: "#000000", shirt: "#000000", pants: "#000000" } as const;
 
@@ -17,6 +17,17 @@ const snap = (id: number, x: number, y: number, name = "x"): PlayerSnap => ({
   avatar_hash: "",
   target_tx: Math.floor(x / 16),
   target_ty: Math.floor(y / 16),
+});
+
+const dec = (id: string, tx: number, ty: number, asset_key: string | null = null, z = 0): Decoration => ({
+  id,
+  scene: "bar",
+  tile_x: tx,
+  tile_y: ty,
+  asset_id: null,
+  asset_key,
+  z_layer: z,
+  placed_by: 1,
 });
 
 describe("applyServerMsg", () => {
@@ -115,5 +126,56 @@ describe("avatarHashOf", () => {
     const a = { ...AV };
     expect(avatarHashOf(a)).toBe(avatarHashOf(a));
     expect(avatarHashOf({ ...a, skin: "#ffffff" })).not.toBe(avatarHashOf(a));
+  });
+});
+
+describe("decorations", () => {
+  it("snapshot_full populates decorations map", () => {
+    let s = initialRoomState(1);
+    s = applyServerMsg(s, {
+      v: 1, type: "snapshot_full", tick: 0, t: 1000,
+      players: [], decorations: [dec("d1", 5, 3, "k/a.png", -1), dec("d2", 2, 7)], npcs: [],
+    });
+    expect(s.decorations.size).toBe(2);
+    expect(s.decorations.get("d1")?.asset_key).toBe("k/a.png");
+    expect(s.decorations.get("d1")?.z_layer).toBe(-1);
+    expect(s.decorations.get("d2")?.asset_key).toBeNull();
+  });
+
+  it("decoration_added upserts into map", () => {
+    let s = initialRoomState(1);
+    s = applyServerMsg(s, {
+      v: 1, type: "snapshot_full", tick: 0, t: 1000,
+      players: [], decorations: [dec("d1", 5, 3)], npcs: [],
+    });
+    s = applyServerMsg(s, {
+      v: 1, type: "decoration_added",
+      decoration: dec("d2", 1, 1, "k/b.png", 1),
+    });
+    expect(s.decorations.size).toBe(2);
+    expect(s.decorations.get("d2")?.asset_key).toBe("k/b.png");
+  });
+
+  it("decoration_removed deletes from map", () => {
+    let s = initialRoomState(1);
+    s = applyServerMsg(s, {
+      v: 1, type: "snapshot_full", tick: 0, t: 1000,
+      players: [], decorations: [dec("d1", 5, 3)], npcs: [],
+    });
+    s = applyServerMsg(s, { v: 1, type: "decoration_removed", id: "d1" });
+    expect(s.decorations.size).toBe(0);
+  });
+
+  it("interpolate outputs DecorationView with tile→pixel coords", () => {
+    let s = initialRoomState(1);
+    s = applyServerMsg(s, {
+      v: 1, type: "snapshot_full", tick: 0, t: 1000,
+      players: [], decorations: [dec("d1", 5, 3, "k/a.png", -1)], npcs: [],
+    });
+    const view = interpolate(s, 1000, 0);
+    expect(view.decorations.length).toBe(1);
+    expect(view.decorations[0]).toEqual({
+      id: "d1", x: 80, y: 48, asset_key: "k/a.png", z_layer: -1,
+    });
   });
 });

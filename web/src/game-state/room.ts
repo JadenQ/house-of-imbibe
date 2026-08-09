@@ -8,10 +8,11 @@
 
 import { TILE } from "../game/tiles";
 import { spawn } from "./map";
-import type { PlayerSnap, ServerMsg } from "../protocol/types";
+import type { Decoration, PlayerSnap, ServerMsg } from "../protocol/types";
 import type {
   BubbleView,
   ChatLine,
+  DecorationView,
   PlayerSample,
   PlayerState,
   PlayerView,
@@ -38,13 +39,14 @@ export function avatarHashOf(a: unknown): string {
   return hashStr(JSON.stringify(a));
 }
 
-/** 初始 RoomState：空玩家、空聊天、本地预测位置 = 出生 tile 中心（+8 像素）。 */
+/** 初始 RoomState：空玩家、空装饰、空聊天、本地预测位置 = 出生 tile 中心（+8 像素）。 */
 export function initialRoomState(selfId: number): RoomState {
   const sp = spawn();
   return {
     selfId,
     scene: "bar",
     players: new Map(),
+    decorations: new Map(),
     chat: [],
     clockOffset: 0,
     localX: sp.tx * TILE + 8,
@@ -80,7 +82,11 @@ export function applyServerMsg(
       for (const p of m.players) {
         players.set(p.id, snapToState(p, m.t));
       }
-      return { ...state, players };
+      const decorations = new Map<string, Decoration>();
+      for (const d of m.decorations) {
+        decorations.set(d.id, d);
+      }
+      return { ...state, players, decorations };
     }
 
     case "snapshot_delta": {
@@ -127,8 +133,20 @@ export function applyServerMsg(
       // serverMs - localMs；localhost 近零延迟。
       return { ...state, clockOffset: m.t - localMs };
 
+    case "decoration_added": {
+      const decorations = new Map(state.decorations);
+      decorations.set(m.decoration.id, m.decoration);
+      return { ...state, decorations };
+    }
+
+    case "decoration_removed": {
+      const decorations = new Map(state.decorations);
+      decorations.delete(m.id);
+      return { ...state, decorations };
+    }
+
     default:
-      // error / kicked / dialogue / decoration_* / scene_changed / 未实现：状态不变。
+      // error / kicked / dialogue / scene_changed / 未实现：状态不变。
       return state;
   }
 }
@@ -208,5 +226,16 @@ export function interpolate(
     }
   }
 
-  return { players, bubbles };
+  const decorations: DecorationView[] = [];
+  for (const [, d] of state.decorations) {
+    decorations.push({
+      id: d.id,
+      x: d.tile_x * TILE,
+      y: d.tile_y * TILE,
+      asset_key: d.asset_key,
+      z_layer: d.z_layer,
+    });
+  }
+
+  return { players, bubbles, decorations };
 }

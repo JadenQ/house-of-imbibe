@@ -3,8 +3,11 @@ import Phaser from "phaser";
 import { api, type AvatarData, type Me } from "./net/api";
 import { showLogin } from "./ui/login";
 import { showAvatarCreate } from "./ui/avatarCreate";
+import { loadModularLocal } from "./ui/avatarBuilder";
 import { showMenu, isMenuOpen, menuBlocksInteract } from "./ui/menu";
 import { createChatPanel } from "./ui/chat";
+import { createTouchControls } from "./ui/touch";
+import { showAdminConsole } from "./ui/admin";
 import { WsClient } from "./net/ws";
 import { msg } from "./protocol/types";
 import { BarScene } from "./scene/BarScene";
@@ -27,6 +30,9 @@ function startGame(me: Me, avatar: AvatarData) {
   const gameEl = document.getElementById("game")!;
   const chat = createChatPanel(gameEl);
 
+  // 触控层（DOM overlay，仅触控设备显示；桌面为 undefined 走键盘回退）
+  const touch = createTouchControls(document.getElementById("app")!);
+
   // WS 传输 + 状态（scene 内部消费消息）
   const transport = new WsClient();
   transport.connect();
@@ -43,7 +49,13 @@ function startGame(me: Me, avatar: AvatarData) {
     backgroundColor: "#14100e",
     scene: [],
   });
-  game.scene.add("bar", BarScene, true, { avatar, transport, selfId: me.id, chatPanel: chat.panel });
+  game.scene.add("bar", BarScene, true, {
+    avatar,
+    transport,
+    selfId: me.id,
+    chatPanel: chat.panel,
+    touch,
+  });
 
   window.addEventListener("resize", () => game.scale.setZoom(fitZoom()));
 
@@ -69,6 +81,12 @@ function startGame(me: Me, avatar: AvatarData) {
   document.getElementById("hud-edit")!.onclick = () => {
     void showAvatarCreate(avatar).then(() => location.reload());
   };
+  // admin 入口：仅 is_admin 显示（Design 2 独立管理台，DOM 非 Phaser）
+  if (me.is_admin) {
+    const adminBtn = document.getElementById("hud-admin")!;
+    adminBtn.style.display = "";
+    adminBtn.onclick = () => showAdminConsole(() => { /* 关闭后回到游戏，不 reload */ });
+  }
 }
 
 async function boot() {
@@ -83,6 +101,10 @@ async function boot() {
     me = await api.me();
   }
   let avatar = me.avatar;
+  // 后端 put_avatar 规范化掉样式字段 → 本机 localStorage 回灌样式（同色才用）。
+  if (avatar && avatar.kind === "modular") {
+    avatar = loadModularLocal(avatar);
+  }
   if (!avatar) {
     avatar = await showAvatarCreate(null);
   }

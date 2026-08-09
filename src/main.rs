@@ -2,12 +2,11 @@
 //! 所有应用逻辑（AppState / handlers / build_router）在 `house_of_imbibe` lib，
 //! 供集成测试复用。本文件只负责：DB 连接 + migrations + 装配 + serve。
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use house_of_imbibe::assets::LocalAssetStore;
 use sqlx::SqlitePool;
-use tokio::sync::RwLock;
 use tracing::info;
 
 #[tokio::main]
@@ -28,18 +27,22 @@ async fn main() {
             .filename(&db_path)
             .create_if_missing(true)
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
-            .busy_timeout(std::time::Duration::from_secs(5)),
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .foreign_keys(true),
     )
     .await
     .expect("connect sqlite");
     sqlx::migrate!("./migrations").run(&db).await.expect("migrations");
+
+    let asset_root = std::env::var("ASSET_DIR").unwrap_or_else(|_| "data/assets".into());
+    std::fs::create_dir_all(&asset_root).ok();
 
     let state = Arc::new(house_of_imbibe::AppState {
         db,
         pixellab_key: std::env::var("PIXELLAB_API_KEY").ok(),
         minimax_key: std::env::var("MINIMAX_API_KEY").ok(),
         http: house_of_imbibe::pixelart::http_client(),
-        jobs: Arc::new(RwLock::new(HashMap::new())),
+        assets: Arc::new(LocalAssetStore::new(asset_root)),
         rt: Arc::new(house_of_imbibe::realtime::RealtimeState::new()),
     });
 

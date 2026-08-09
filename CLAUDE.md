@@ -19,14 +19,27 @@ GBA/宝可梦绿宝石画风的 Web 像素社交酒吧。技术栈已锁定：**
 ## 新增（2026-08-04）切片 4 输入管线
 
 - `src/bin/image2pixel.rs` 是 photo→avatar 的 demo binary。所有调用方式、踩坑、API 字段名差异（OpenAPI vs live）都在 `docs/image2pixel-demo.md`。
-- **管线策略（已锁定）**：
-  - **主路径**：上传图片 → `image-to-pixelart`（PixelLab 直转，同步，~$0.007，图片 ≤1280×1280）
-  - **回退路径**：图片过大 / `image-to-pixelart` 失败 → MiniMax-M3 vision 描述文字 → `create-image-pixen` / `create-character-with-4-directions`（文字生成，~$0.013，30–120 s）
-  - **回退的回退**：MiniMax 429 / 不可用 → 用户手动填写描述文字 → 走文字生成
-  - 调用顺序：**先尝试直转，失败再走 vision→text，最后兜底手动文字**。不要跳过直转直接走 vision。
+- **管线策略（2026-08-09 用户定稿，取代旧「直转先」锁定）**：
+  - **主路径**：上传图片 → MiniMax-M3 vision 描述文字 → `create-character-with-4-directions`（4 方向，~$0.013）→ `animate-character`（行走动画，4 方向，v3 模式 ~$0.013/方向）→ 下载 PNG 进 AssetStore。~$0.06/角色，4 方向 + 行走。
+  - **回退**：MiniMax 429 / 不可用 → 用户手动填写描述文字 → `create-character-with-4-directions`（文字）→ animate。
+  - ⚠️ **放弃「直转先」**：`image-to-pixelart` 直转只产出单张 south 像素图，**不是可走多方向角色**（pixellab-api §六），直转后仍需 v3 旋转+animate，并不比 vision→text 省钱/省步，故不采用直转为主路径。直转只在地图背景层（D1）用。
+  - generated 角色 **4 方向**（south/north/west/east），对角靠镜像；canonical 8 方向契约降级为 4 方向渲染（D2 定稿）。
 - 切片 4 落地时必须新增 `VisionClient` trait，**与 `PixelLabClient` 同形状**（submit/poll 分离 + 领域类型，不绑供应商）。MiniMax-M3 仅是当前实现，Anthropic / OpenAI / Gemini 任一都要能热插拔。
 - 像素画调色板锁 GBA emerald：发 `create-character-with-4-directions` 时**必须**带 `color_image`（一份固定的 GBA palette PNG）+ `force_colors: true`，否则会漂。
 - 已知 live API 与 OpenAPI spec 三处不一致（见 demo 注释）：image-to-pixelart 要 `image_size` + `output_size`；create-character 返回 `background_job_id` 单数；create-image-pixen 拒绝 `model`/`negative_description`/`seed` 字段。
+
+## 新增（2026-08-09）地图 + 人物生成方案（用户已定稿，见 issue #0010）
+
+- **地图三层架构**：①视觉背景层（**D1=生成整张背景图**：文字→`create-image-pixen` 或 图片→`image-to-pixelart`，240×160，~$0.007）②可走/碰撞网格层（admin 手标 walkable/blocked，服务端 clamp 读它）③家具装饰对象层（= decorations 方案，issue #7）。PixelLab 生成的扁平像素图 ≠ 可走 tilemap，三层必须解耦。
+- **人物生成定稿**：2a modular = **代码手绘部件扩展**（发型/上衣/下装/鞋子样式选项 + 捏脸 UI，非 PNG preset）；2b/2c = vision→text 或手动文字 → `create-character-with-4-directions`(4方向) → `animate-character`(行走)；**D2=4方向+行走**（非8方向，对角镜像）；**D3=一个用户一个形象、可重新生成覆盖**（avatars.user_id PK + upsert）；**D4=generated 角色也允许配 accessories**（放宽 PRD non-interoperability，手物/背饰 overlay 装到 generated）。
+- generated avatar `config_json` 契约 = `{kind:"generated", character_id, frames: {south:[key…], north:[…], west:[…], east:[…]}}`（每方向帧 key 数组，1 帧=静站，3 帧=行走）；前端 `loadGeneratedSheet` 按 `/api/assets/{key}` 取图合成 3列×4行 sheet。
+
+## 新增（2026-08-09）交互 UX + Admin 方案（design-an-interface 盘问后定稿）
+
+- **Admin = Design 2 独立管理台**：is_admin 才显示「管理」入口 → 独立全屏 DOM console（非 Phaser），tabs:地图/成员/装饰。编辑全在 DOM/net，**scene 保持只读**（不违禁令#3 精神）；移动端优先（大目标 DOM）。地图 tab：放大可编辑网格 + walkable 笔刷 + 装饰放置 +「重新生成背景」（D1，文字→create-image-pixen）。成员 tab：表 + 提升/降级/封禁。
+- **点单 = 只读看单**：menu 仅展示，**不下单**（PRD menu 内容 TBD/接口 only）。
+- **异步形象 = 非阻塞 library**：生成提交后**可先入场玩**（默认/当前形象），job 后台轮询，完成时通知 + 热替换/刷新；**不再阻塞模态干等**（修掉 avatarCreate 现状的 5–9min 阻塞 poll）。
+- modular 样式字段（hairStyle/topStyle/bottomStyle/shoeStyle/shoes）**必须**由 `put_avatar` 完整持久化 + 经 WS 快照透传给远端（AvatarSnapshot=serde_json::Value 已透明，只需 put_avatar 不剥离）。
 
 ## 其他硬约束
 

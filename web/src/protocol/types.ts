@@ -2,11 +2,23 @@
 // net/ protocol/ game-state/ 禁止 import phaser（dev-plan §2.3）。
 
 export type AvatarSnapshot =
-  | { kind: "modular"; skin: string; hair: string; shirt: string; pants: string }
+  | {
+      kind: "modular";
+      skin: string;
+      hair: string;
+      shirt: string;
+      pants: string;
+      /** 切片 2a 捏脸样式（可选；服务端当前可能不持久化，缺失→默认） */
+      shoes?: string;
+      hairStyle?: string;
+      topStyle?: string;
+      bottomStyle?: string;
+      shoeStyle?: string;
+    }
   | {
       kind: "generated";
       character_id: string;
-      rotations: { direction: string; url: string }[];
+      frames: Record<string, string[]>; // 每方向帧 key 数组（1=静站，3=行走）
     };
 
 export interface PlayerSnap {

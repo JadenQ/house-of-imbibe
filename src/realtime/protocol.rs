@@ -16,7 +16,7 @@ pub fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// 形象快照 = 原始 config_json（modular 配色或 generated rotations）。
+/// 形象快照 = 原始 config_json（modular 配色或 generated frames）。
 /// 服务端对 kind 透明；装载层（前端 prepareCharacterSheet）负责解析。
 pub type AvatarSnapshot = serde_json::Value;
 

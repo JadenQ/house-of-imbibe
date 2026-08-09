@@ -23,7 +23,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # 仅 image2pixel 二进制使用
 # 注意：不能用 default-features = false，否则会破坏 argon2 的 OsRng feature 解析
-reqwest = { version = "0.12", features = ["json", "rustls-tls", "cookies"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "cookies", "multipart"] }
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
@@ -31,6 +31,9 @@ anyhow = "1"
 # 实时脊椎（切片 1）：房间状态 + WS stream split
 dashmap = "6"
 futures-util = "0.3"
+
+# 切片 3a 地基：AssetStore 错误类型
+thiserror = "1"
 
 [dev-dependencies]
 # 集成测试 harness：真 WS 客户端 + 临时 SQLite

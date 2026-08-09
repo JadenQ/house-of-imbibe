@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use house_of_imbibe::assets::LocalAssetStore;
 use house_of_imbibe::realtime::RealtimeState;
 use house_of_imbibe::{build_router, AppState};
 use sqlx::SqlitePool;
@@ -30,7 +31,8 @@ pub async fn spawn_app() -> TestApp {
             .filename(&path)
             .create_if_missing(true)
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
-            .busy_timeout(std::time::Duration::from_secs(5)),
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .foreign_keys(true),
     )
     .await
     .expect("connect sqlite");
@@ -39,13 +41,17 @@ pub async fn spawn_app() -> TestApp {
         .await
         .expect("migrate");
 
+    // 临时 asset 目录
+    let asset_tmp = tempfile::TempDir::new().expect("asset tempfile");
+    let asset_path = asset_tmp.path().to_str().expect("asset path").to_string();
+
     let rt = Arc::new(RealtimeState::new());
     let state = Arc::new(AppState {
         db: db.clone(),
         pixellab_key: None,
         minimax_key: None,
         http: house_of_imbibe::pixelart::http_client(),
-        jobs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        assets: Arc::new(LocalAssetStore::new(asset_path)),
         rt,
     });
     let app = build_router(state);
@@ -56,6 +62,7 @@ pub async fn spawn_app() -> TestApp {
         axum::serve(listener, app).await.expect("serve");
     });
     std::mem::forget(tmp);
+    std::mem::forget(asset_tmp);
     TestApp { base_url: format!("http://{addr}"), db }
 }
 

@@ -82,10 +82,11 @@ async fn realtime_spine_end_to_end() {
     }
     let _ = recv(&mut ws_b).await; // chat_backlog
 
-    // A move(5,3) → B 在 700ms 内收到含 A 新位置的 delta
+    // A move(8,2) → B 在 700ms 内收到含 A 新位置的 delta
     // (8,2) 是地板（row 2 全地板），可走；spawn 在 (7,6)。注意：move 到墙里会被 clamp。
+    // 谓词排除 spawn 附近（y>80 排除 y≈96），避免返回 move 前的 stale delta（并行测试时尤其重要）。
     send(&mut ws_a, &ClientMsg::Move { v: 1, tx: 8, ty: 2 }).await;
-    let moved = recv_delta_with(&mut ws_b, |p| p.name == "alice")
+    let moved = recv_delta_with(&mut ws_b, |p| p.name == "alice" && p.y < 80.0)
         .await
         .expect("B did not receive A's move delta");
     assert!(moved.x > 7.0 * 16.0 && moved.x < 9.0 * 16.0, "A x not near tile 8: {}", moved.x);

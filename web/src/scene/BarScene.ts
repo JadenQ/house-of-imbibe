@@ -9,8 +9,10 @@ import type { AvatarData } from "../net/api";
 import type { Transport } from "../net/transport";
 import { parseMsg, msg } from "../protocol/types";
 import { initialRoomState, applyServerMsg, interpolate } from "../game-state/room";
+import { dominantDir } from "../game-state/joystick";
 import type { RoomState, RenderView } from "../game-state/types";
 import type { ChatPanel } from "../ui/chat";
+import type { TouchControls } from "../ui/touch";
 
 const SPEED = 42; // px/s，240×160 世界里的步行速度
 const WALK_CYCLE = [0, 1, 0, 2]; // stand, stepA, stand, stepB
@@ -26,6 +28,8 @@ export interface BarSceneInit {
   transport: Transport;
   selfId: number;
   chatPanel: ChatPanel;
+  /** 触控层（仅触控设备存在；桌面为 undefined，走键盘回退）。 */
+  touch?: TouchControls;
 }
 
 export class BarScene extends Phaser.Scene {
@@ -48,6 +52,7 @@ export class BarScene extends Phaser.Scene {
   private pendingPing = 0;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private lastSendAt = 0;
+  private touch?: TouchControls;
 
   constructor() {
     super("bar");
@@ -56,6 +61,7 @@ export class BarScene extends Phaser.Scene {
   init(data: BarSceneInit) {
     this.opts = data;
     this.avatarData = data.avatar;
+    this.touch = data.touch;
   }
 
   async create() {
@@ -135,6 +141,8 @@ export class BarScene extends Phaser.Scene {
 
   update(_time: number, delta: number) {
     // ── 本地预测：输入 → 移动 + 碰撞（与单机版一致）──
+    // 键盘为二值 {-1,0,1}²（归一化到满速）；触控摇杆为模拟量 [-1,1]²（模长即速度）。
+    // 摇杆 active 时覆盖键盘；桌面无触控层 → 走原 WASD 路径不变（回退方案）。
     const k = this.keys;
     let vx = 0;
     let vy = 0;
@@ -143,17 +151,43 @@ export class BarScene extends Phaser.Scene {
     if (k.W.isDown || k.UP.isDown) vy = -1;
     else if (k.S.isDown || k.DOWN.isDown) vy = 1;
 
+    // 触控模拟量覆盖键盘（同一条本地预测路径：facing/碰撞/发送/纠正/插值不变）
+    let analog = false;
+    const ti = this.touch?.getInput();
+    if (ti && ti.active && (ti.x !== 0 || ti.y !== 0)) {
+      vx = ti.x;
+      vy = ti.y;
+      analog = true;
+    }
+
     const moving = vx !== 0 || vy !== 0;
     if (moving) {
-      if (vy < 0) this.facing = "n";
-      else if (vy > 0) this.facing = "s";
-      else if (vx < 0) this.facing = "w";
-      else if (vx > 0) this.facing = "e";
+      if (analog) {
+        // 模拟量用主轴方向（微倾不误判；键盘仍走 vy-priority 原逻辑不变）
+        const d = dominantDir(vx, vy);
+        if (d) this.facing = d;
+      } else {
+        if (vy < 0) this.facing = "n";
+        else if (vy > 0) this.facing = "s";
+        else if (vx < 0) this.facing = "w";
+        else if (vx > 0) this.facing = "e";
+      }
 
       const dist = (SPEED * delta) / 1000;
-      const len = Math.hypot(vx, vy);
-      const nx = this.player.x + (vx / len) * dist;
-      const ny = this.player.y + (vy / len) * dist;
+      // 模拟量向量已在 [-1,1] 且模长 ≤1 → 直接乘 dist（模长即速度）；
+      // 键盘二值需归一化到单位向量（对角线不加速）。
+      let mx: number;
+      let my: number;
+      if (analog) {
+        mx = vx * dist;
+        my = vy * dist;
+      } else {
+        const len = Math.hypot(vx, vy);
+        mx = (vx / len) * dist;
+        my = (vy / len) * dist;
+      }
+      const nx = this.player.x + mx;
+      const ny = this.player.y + my;
       if (this.canStand(nx, this.player.y)) this.player.x = nx;
       if (this.canStand(this.player.x, ny)) this.player.y = ny;
 
@@ -252,7 +286,7 @@ export class BarScene extends Phaser.Scene {
       this.lastChatLen = this.roomState.chat.length;
     }
 
-    // ── 交互：面向吧台/酒架时提示，按 E 开酒单（不变）──
+    // ── 交互：面向吧台/酒架时提示，按 E / 动作键开酒单（不变）──
     const ch = this.facingTile();
     const interactId = ch ? BAR_MAP.interact[ch] : undefined;
     if (interactId && !this.hintShown) {
@@ -262,10 +296,13 @@ export class BarScene extends Phaser.Scene {
       this.hintShown = false;
       window.dispatchEvent(new CustomEvent("hoi:hint", { detail: null }));
     }
-    if (
-      interactId &&
-      (Phaser.Input.Keyboard.JustDown(this.keys.E) || Phaser.Input.Keyboard.JustDown(this.keys.SPACE))
-    ) {
+    // 动作键 = E：consumeInteract 每帧消费边沿（无论是否面向可交互物），
+    // 避免按下未命中后走过去触发陈旧 interact；与 JustDown 同为边沿语义。
+    const wantInteract =
+      Phaser.Input.Keyboard.JustDown(this.keys.E) ||
+      Phaser.Input.Keyboard.JustDown(this.keys.SPACE) ||
+      (this.touch?.consumeInteract() ?? false);
+    if (interactId && wantInteract) {
       window.dispatchEvent(new CustomEvent("hoi:interact", { detail: interactId }));
     }
   }

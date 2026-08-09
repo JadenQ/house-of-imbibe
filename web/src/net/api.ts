@@ -7,20 +7,32 @@ export interface Me {
   avatar: AvatarData | null;
 }
 
-/** 模块化配色形象 */
+/** 模块化配色 + 样式形象（切片 2a 捏脸）。
+ *  样式字段可选；缺失 → 默认 short/tshirt/pants/boots（向后兼容，不破坏现有 DEFAULT_COLORS）。
+ *  样式取值见 game/character.ts 的 HAIR_STYLES / TOP_STYLES / BOTTOM_STYLES / SHOE_STYLES。 */
 export interface ModularAvatar {
   kind: "modular";
   skin: string;
   hair: string;
   shirt: string;
   pants: string;
+  /** 鞋色（可选；缺失 → 默认深轮廓色） */
+  shoes?: string;
+  /** 发型样式：short|long|bald|cap */
+  hairStyle?: string;
+  /** 上衣样式：tshirt|longsleeve|vest */
+  topStyle?: string;
+  /** 下装样式：pants|shorts|skirt */
+  bottomStyle?: string;
+  /** 鞋样式：boots|sneakers|sandals */
+  shoeStyle?: string;
 }
 
-/** AI 生成的 4 方向形象 */
+/** AI 生成的 4 方向形象。frames: 每方向帧 key 数组（1=静站，3=行走），经 /api/assets/{key} 取图。 */
 export interface GeneratedAvatar {
   kind: "generated";
   character_id: string;
-  rotations: { direction: string; url: string }[];
+  frames: Record<"south" | "north" | "west" | "east", string[]>;
 }
 
 export type AvatarData = ModularAvatar | GeneratedAvatar;
@@ -39,6 +51,13 @@ export interface MenuPayload {
 export interface AvatarJobStatus {
   status: "processing" | "completed" | "failed";
   error?: string;
+}
+
+export interface Member {
+  id: number;
+  username: string;
+  is_admin: boolean;
+  banned: boolean;
 }
 
 async function req<T>(method: string, url: string, body?: unknown): Promise<T> {
@@ -90,4 +109,11 @@ export const api = {
   },
   pollAvatarJob: (jobId: string) => req<AvatarJobStatus>("GET", `/api/avatar/generate/${jobId}`),
   menu: () => req<MenuPayload>("GET", "/api/menu"),
+  admin: {
+    listMembers: () => req<Member[]>("GET", "/api/admin/members"),
+    promote: (id: number) => req<void>("POST", `/api/admin/members/${id}/promote`),
+    demote: (id: number) => req<void>("POST", `/api/admin/members/${id}/demote`),
+    ban: (id: number) => req<void>("POST", `/api/admin/members/${id}/ban`),
+    unban: (id: number) => req<void>("POST", `/api/admin/members/${id}/unban`),
+  },
 };

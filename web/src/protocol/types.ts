@@ -1,6 +1,12 @@
 // protocol/ —— WS 消息类型，手工镜像 src/realtime/protocol.rs。
 // net/ protocol/ game-state/ 禁止 import phaser（dev-plan §2.3）。
 
+export interface EquippedItem {
+  slot: "back" | "hand";
+  asset_id: string | null;
+  asset_key: string | null;
+}
+
 export type AvatarSnapshot =
   | {
       kind: "modular";
@@ -14,11 +20,15 @@ export type AvatarSnapshot =
       topStyle?: string;
       bottomStyle?: string;
       shoeStyle?: string;
+      /** 已装备配件（back/hand slot）；缺失 → 空（向后兼容） */
+      equipped?: EquippedItem[];
     }
   | {
       kind: "generated";
       character_id: string;
       frames: Record<string, string[]>; // 每方向帧 key 数组（1=静站，3=行走）
+      /** 已装备配件（D4 允许 generated 配件）；缺失 → 空（向后兼容） */
+      equipped?: EquippedItem[];
     };
 
 export interface PlayerSnap {

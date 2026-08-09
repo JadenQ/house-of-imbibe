@@ -251,6 +251,34 @@ fn whitelist(v: Option<&str>, allowed: &[&'static str], fallback: &'static str) 
     fallback
 }
 
+/// 校验 slot ∈ {back, hand}（accessories 只有两槽位）。
+fn validate_slot(slot: &str) -> Result<(), ApiError> {
+    if slot != "back" && slot != "hand" {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "slot must be 'back' or 'hand'".into()));
+    }
+    Ok(())
+}
+
+/// 校验 equipped 数组结构：每项 slot ∈ {back, hand}；至多 2 项（每 slot 一条）。
+/// 用于 put_avatar 透传（不剥离，像样式字段一样）。equipped 由 equip 端点写入，
+/// 这里只做结构校验防注入任意大 JSON。
+fn validate_equipped(equipped: &serde_json::Value) -> Result<serde_json::Value, ApiError> {
+    let arr = equipped
+        .as_array()
+        .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "equipped must be an array".into()))?;
+    if arr.len() > 2 {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "equipped has at most 2 items".into()));
+    }
+    for item in arr {
+        let slot = item
+            .get("slot")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "equipped item missing slot".into()))?;
+        validate_slot(slot)?;
+    }
+    Ok(equipped.clone())
+}
+
 pub async fn put_avatar(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -293,6 +321,10 @@ pub async fn put_avatar(
     if let Some(s) = shoes_opt {
         n.insert("shoes".into(), serde_json::Value::from(s));
     }
+    // Preserve equipped field (like style fields; validated structure).
+    if let Some(equipped) = cfg.get("equipped") {
+        n.insert("equipped".into(), validate_equipped(equipped)?);
+    }
     let normalized = serde_json::Value::Object(n);
     sqlx::query(
         "INSERT INTO avatars (user_id, kind, config_json, updated_at) VALUES (?, 'modular', ?, ?)
@@ -304,6 +336,123 @@ pub async fn put_avatar(
     .execute(&state.db)
     .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------- accessories（equip/unequip）----------
+
+/// POST /api/avatar/equip {slot, asset_id} → 200 {avatar: config_json}。
+/// 校验 slot ∈ {back,hand} + asset 存在且 owner_id=自己 → 查 storage_key 作
+/// asset_key → equipped 里替换同 slot（或追加）→ UPDATE config_json。
+/// kind=modular 或 generated 都允许（D4，不拒绝 generated）。
+#[derive(Deserialize)]
+pub struct EquipRequest {
+    pub slot: String,
+    pub asset_id: String,
+}
+
+/// POST /api/avatar/unequip {slot} → 200 {avatar: config_json}。
+#[derive(Deserialize)]
+pub struct UnequipRequest {
+    pub slot: String,
+}
+
+pub async fn avatar_equip(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<EquipRequest>,
+) -> Result<Response, ApiError> {
+    let (id, _, _) = current_user(&state, &headers)
+        .await
+        .ok_or(ApiError(StatusCode::UNAUTHORIZED, "not logged in".into()))?;
+    validate_slot(&body.slot)?;
+
+    // asset 存在且 owner_id = 自己
+    let asset_row: Option<(String, i64)> =
+        sqlx::query_as("SELECT storage_key, owner_id FROM assets WHERE id = ?")
+            .bind(&body.asset_id)
+            .fetch_optional(&state.db)
+            .await?;
+    let (storage_key, owner_id) = asset_row
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "asset not found".into()))?;
+    if owner_id != id {
+        return Err(ApiError(StatusCode::FORBIDDEN, "not asset owner".into()));
+    }
+
+    // 读当前 config_json
+    let (cfg_str,): (String,) =
+        sqlx::query_as("SELECT config_json FROM avatars WHERE user_id = ?")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or(ApiError(StatusCode::NOT_FOUND, "no avatar; save one first".into()))?;
+    let mut cfg: serde_json::Value = serde_json::from_str(&cfg_str)
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "bad config_json".into()))?;
+
+    // 替换同 slot 或追加（每 slot 至多一条）
+    let entry = json!({
+        "slot": body.slot.as_str(),
+        "asset_id": body.asset_id.as_str(),
+        "asset_key": storage_key.as_str(),
+    });
+    match cfg.get_mut("equipped").and_then(|v| v.as_array_mut()) {
+        Some(arr) => {
+            let slot_str = body.slot.as_str();
+            let idx = arr
+                .iter()
+                .position(|item| item.get("slot").and_then(|v| v.as_str()) == Some(slot_str));
+            match idx {
+                Some(i) => arr[i] = entry,
+                None => arr.push(entry),
+            }
+        }
+        None => {
+            cfg["equipped"] = serde_json::Value::Array(vec![entry]);
+        }
+    }
+
+    sqlx::query("UPDATE avatars SET config_json = ?, updated_at = ? WHERE user_id = ?")
+        .bind(cfg.to_string())
+        .bind(now_ts())
+        .bind(id)
+        .execute(&state.db)
+        .await?;
+
+    Ok((StatusCode::OK, Json(json!({ "avatar": cfg }))).into_response())
+}
+
+pub async fn avatar_unequip(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<UnequipRequest>,
+) -> Result<Response, ApiError> {
+    let (id, _, _) = current_user(&state, &headers)
+        .await
+        .ok_or(ApiError(StatusCode::UNAUTHORIZED, "not logged in".into()))?;
+    validate_slot(&body.slot)?;
+
+    let (cfg_str,): (String,) =
+        sqlx::query_as("SELECT config_json FROM avatars WHERE user_id = ?")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or(ApiError(StatusCode::NOT_FOUND, "no avatar; save one first".into()))?;
+    let mut cfg: serde_json::Value = serde_json::from_str(&cfg_str)
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "bad config_json".into()))?;
+
+    // 移除该 slot（equipped 不存在 → no-op）
+    if let Some(arr) = cfg.get_mut("equipped").and_then(|v| v.as_array_mut()) {
+        let slot_str = body.slot.as_str();
+        arr.retain(|item| item.get("slot").and_then(|v| v.as_str()) != Some(slot_str));
+    }
+
+    sqlx::query("UPDATE avatars SET config_json = ?, updated_at = ? WHERE user_id = ?")
+        .bind(cfg.to_string())
+        .bind(now_ts())
+        .bind(id)
+        .execute(&state.db)
+        .await?;
+
+    Ok((StatusCode::OK, Json(json!({ "avatar": cfg }))).into_response())
 }
 
 // ---------- 形象生成（照片 → PixelLab 4方向） ----------
@@ -909,6 +1058,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/logout", post(logout))
         .route("/me", get(me))
         .route("/avatar", put(put_avatar))
+        .route("/avatar/equip", post(avatar_equip))
+        .route("/avatar/unequip", post(avatar_unequip))
         .route("/avatar/generate", post(avatar_generate_submit))
         .route("/avatar/generate-text", post(avatar_generate_text))
         .route("/avatar/generate/{job_id}", get(avatar_generate_poll))

@@ -26,6 +26,8 @@ export interface ModularAvatar {
   bottomStyle?: string;
   /** 鞋样式：boots|sneakers|sandals */
   shoeStyle?: string;
+  /** 已装备配件（back/hand slot）；缺失 → 空（向后兼容） */
+  equipped?: EquippedItem[];
 }
 
 /** AI 生成的 4 方向形象。frames: 每方向帧 key 数组（1=静站，3=行走），经 /api/assets/{key} 取图。 */
@@ -33,6 +35,17 @@ export interface GeneratedAvatar {
   kind: "generated";
   character_id: string;
   frames: Record<"south" | "north" | "west" | "east", string[]>;
+  /** 已装备配件（back/hand slot；D4 允许 generated 配件）；缺失 → 空（向后兼容） */
+  equipped?: EquippedItem[];
+}
+
+/** 已装备配件条目（存 config_json，equip 时 JOIN 查 asset_key 存入供前端直接拼 /api/assets/{asset_key}）。
+ *  asset_key = 该 asset 的 storage_key；null = 无资产 / 占位。
+ *  每 slot 至多一条。 */
+export interface EquippedItem {
+  slot: "back" | "hand";
+  asset_id: string | null;
+  asset_key: string | null;
 }
 
 export type AvatarData = ModularAvatar | GeneratedAvatar;
@@ -103,6 +116,10 @@ export const api = {
     req<{ id: number; username: string }>("POST", "/api/login", { username, password }),
   logout: () => req<void>("POST", "/api/logout"),
   saveAvatar: (config: ModularAvatar) => req<void>("PUT", "/api/avatar", { config }),
+  equip: (slot: "back" | "hand", assetId: string) =>
+    req<{ avatar: AvatarData }>("POST", "/api/avatar/equip", { slot, asset_id: assetId }),
+  unequip: (slot: "back" | "hand") =>
+    req<{ avatar: AvatarData }>("POST", "/api/avatar/unequip", { slot }),
   generateAvatar: async (photo: File): Promise<{ job_id: string }> => {
     const form = new FormData();
     form.append("image", photo);

@@ -1,4 +1,6 @@
-// ui/ — 形象创建：上传照片（生成）/ 捏脸（modular）/ 使用默认
+// ui/ — 形象创建：上传照片（生成）/ 捏脸（modular）/ 使用默认。
+// 异步 UX（非阻塞 library，2026-08-09 定稿，issue #0010）：提交生成后立即用默认/当前
+// 形象入场游玩，后台轮询 job，完成时弹 toast 通知刷新——不在模态里干等 5–9 分钟。
 import { api, type AvatarData, type ModularAvatar } from "../net/api";
 import { renderAvatarBuilder, saveModularLocal } from "./avatarBuilder";
 
@@ -20,30 +22,16 @@ export function showAvatarCreate(initial: AvatarData | null): Promise<AvatarData
 
     function showChoose() {
       const ui = document.getElementById("ui")!;
-
       ui.innerHTML = `
         <div class="overlay"><div class="panel avatar-panel">
           <h1>捏 个 人</h1>
           <h2>上传照片生成，或自选捏脸</h2>
-
           <div class="av-upload" id="av-upload">
             <input type="file" id="av-photo" accept="image/jpeg,image/png,image/webp,image/gif" />
             <div class="av-upload-hint" id="av-upload-hint">点击或拖拽照片到这里</div>
             <div class="av-upload-file" id="av-file-name"></div>
           </div>
-
-          <div class="av-progress" id="av-progress" style="display:none">
-            <div class="av-progress-bar"><div class="av-progress-fill" id="av-fill"></div></div>
-            <div class="av-progress-text" id="av-progress-text">生成中…</div>
-          </div>
-
-          <div class="av-preview" id="av-preview" style="display:none">
-            <div class="av-preview-label">你的像素形象</div>
-            <div class="av-preview-dirs" id="av-preview-dirs"></div>
-          </div>
-
           <div class="err" id="av-err"></div>
-
           <button class="btn" id="av-go" disabled>生 成 形 象</button>
           <button class="btn ghost" id="av-build">捏 脸（自 选 样 式）</button>
           <button class="btn ghost" id="av-skip">使 用 默 认 形 象</button>
@@ -56,21 +44,12 @@ export function showAvatarCreate(initial: AvatarData | null): Promise<AvatarData
       const buildBtn = document.getElementById("av-build") as HTMLButtonElement;
       const skipBtn = document.getElementById("av-skip") as HTMLButtonElement;
       const errEl = document.getElementById("av-err")!;
-      const progressEl = document.getElementById("av-progress")!;
-      const progressText = document.getElementById("av-progress-text")!;
-      const fillEl = document.getElementById("av-fill")!;
-      const previewEl = document.getElementById("av-preview")!;
-      const previewDirs = document.getElementById("av-preview-dirs")!;
-
       let pickedFile: File | null = null;
 
-      // 文件选择
       upload.onclick = () => fileInput.click();
       fileInput.onchange = () => {
         if (fileInput.files?.[0]) onFile(fileInput.files[0]);
       };
-
-      // 拖拽
       upload.addEventListener("dragenter", (e) => { e.preventDefault(); upload.classList.add("dragover"); });
       upload.addEventListener("dragover", (e) => { e.preventDefault(); upload.classList.add("dragover"); });
       upload.addEventListener("dragleave", () => upload.classList.remove("dragover"));
@@ -88,95 +67,25 @@ export function showAvatarCreate(initial: AvatarData | null): Promise<AvatarData
         document.getElementById("av-upload-hint")!.textContent = "已选择照片（点击更换）";
       }
 
-      // 生成
+      // 生成：非阻塞——提交后立即用默认/当前形象入场，后台轮询；完成时 toast 通知刷新。
       goBtn.onclick = async () => {
         if (!pickedFile) return;
         goBtn.disabled = true;
         skipBtn.disabled = true;
         buildBtn.disabled = true;
         errEl.textContent = "";
-        progressEl.style.display = "block";
-        previewEl.style.display = "none";
-        progressText.textContent = "正在上传…";
-
         try {
           const { job_id } = await api.generateAvatar(pickedFile);
-          progressText.textContent = "生成中…（约 2 分钟）";
-          fillEl.style.width = "30%";
-
-          const startTime = Date.now();
-          const poll = async (): Promise<void> => {
-            const status = await api.pollAvatarJob(job_id);
-            const elapsed = Math.round((Date.now() - startTime) / 1000);
-
-            if (status.status === "completed") {
-              fillEl.style.width = "100%";
-              progressText.textContent = `完成！用时 ${elapsed} 秒`;
-
-              // 重新获取用户信息以拿到生成的 avatar
-              const me = await api.me();
-              if (me.avatar && me.avatar.kind === "generated") {
-                showPreview(me.avatar);
-                // 自动保存完成，确认后 resolve
-                showConfirm(me.avatar);
-              } else {
-                errEl.textContent = "生成完成但未找到形象数据";
-                goBtn.disabled = false;
-                skipBtn.disabled = false;
-                buildBtn.disabled = false;
-              }
-              return;
-            }
-
-            if (status.status === "failed") {
-              progressEl.style.display = "none";
-              errEl.textContent = status.error ?? "生成失败，请重试";
-              goBtn.disabled = false;
-              skipBtn.disabled = false;
-              buildBtn.disabled = false;
-              return;
-            }
-
-            // 仍在处理中
-            fillEl.style.width = `${Math.min(90, 30 + elapsed / 2)}%`;
-            progressText.textContent = `生成中…（已等待 ${elapsed} 秒）`;
-            await new Promise((r) => setTimeout(r, POLL_INTERVAL));
-            await poll();
-          };
-
-          await poll();
+          ui.innerHTML = "";
+          resolve(initial ?? DEFAULT_COLORS); // 立即入场（默认/当前形象）
+          pollAvatarInBackground(job_id); // 后台轮询，完成时 toast
         } catch (e) {
-          progressEl.style.display = "none";
           errEl.textContent = (e as Error).message;
           goBtn.disabled = false;
           skipBtn.disabled = false;
           buildBtn.disabled = false;
         }
       };
-
-      function showPreview(avatar: AvatarData) {
-        if (avatar.kind !== "generated") return;
-        previewEl.style.display = "block";
-        const dirNames: Record<string, string> = { south: "正面", north: "背面", west: "左", east: "右" };
-        previewDirs.innerHTML = Object.entries(avatar.frames)
-          .map(
-            ([dir, keys]) =>
-              `<div class="av-dir-cell">
-                <img src="/api/assets/${keys[0]}" alt="${dir}" />
-                <div class="av-dir-label">${dirNames[dir] ?? dir}</div>
-              </div>`,
-          )
-          .join("");
-      }
-
-      function showConfirm(avatar: AvatarData) {
-        goBtn.textContent = "就 这 样 了";
-        goBtn.disabled = false;
-        goBtn.onclick = () => {
-          ui.innerHTML = "";
-          resolve(avatar);
-        };
-      }
 
       // 捏脸（modular）入口
       buildBtn.onclick = () => {
@@ -206,4 +115,48 @@ export function showAvatarCreate(initial: AvatarData | null): Promise<AvatarData
       };
     }
   });
+}
+
+/**
+ * 后台轮询生成 job，完成/失败时弹一个固定 toast（非阻塞，不挡游玩）。
+ * 完成后 worker 已把生成形象存进 avatars.config_json；用户点「刷新」应用。
+ * status 对齐后端 DB 值：pending/running/done/failed。
+ */
+function pollAvatarInBackground(jobId: string): void {
+  const toast = document.createElement("div");
+  toast.style.cssText =
+    "position:fixed;right:12px;bottom:12px;z-index:20;max-width:260px;" +
+    "background:rgba(20,16,14,.92);border:2px solid #d4a24e;color:#e8dcc8;" +
+    "font:11px 'Courier New',ui-monospace,monospace;padding:8px 10px;border-radius:4px;";
+  toast.textContent = "形象生成中…（可继续游玩）";
+  document.body.appendChild(toast);
+
+  const start = Date.now();
+  const tick = async (): Promise<void> => {
+    let finished = false;
+    try {
+      const st = await api.pollAvatarJob(jobId);
+      if (st.status === "done") {
+        toast.textContent = "✓ 形象生成完成";
+        const btn = document.createElement("button");
+        btn.textContent = "刷新应用";
+        btn.style.cssText =
+          "margin-left:8px;border:1px solid #d4a24e;background:transparent;color:#d4a24e;" +
+          "font:inherit;padding:1px 6px;cursor:pointer;";
+        btn.onclick = () => location.reload();
+        toast.appendChild(btn);
+        finished = true;
+      } else if (st.status === "failed") {
+        toast.textContent = "形象生成失败：" + (st.error ?? "未知");
+        finished = true;
+      } else {
+        // pending / running
+        toast.textContent = `形象生成中…（${Math.round((Date.now() - start) / 1000)}s）`;
+      }
+    } catch {
+      /* 网络瞬断，继续轮询 */
+    }
+    if (!finished) setTimeout(() => void tick(), POLL_INTERVAL);
+  };
+  void tick();
 }

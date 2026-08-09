@@ -49,7 +49,7 @@ export interface MenuPayload {
 }
 
 export interface AvatarJobStatus {
-  status: "processing" | "completed" | "failed";
+  status: "pending" | "running" | "done" | "failed";
   error?: string;
 }
 

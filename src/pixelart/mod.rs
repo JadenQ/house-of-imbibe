@@ -23,6 +23,9 @@
 //! - `pixellab_create_character_4dir` — text → 4-direction game character (async; submit).
 //! - `poll_character` — poll an async PixelLab job to completion.
 //! - `pixellab_character_rotation_urls` — fetch the 4 direction URLs after completion.
+//! - `pixellab_animate_character` — submit v3 walk-animation jobs per direction (async; submit).
+//! - `pixellab_character_animations` — fetch per-direction animation frame URLs after animate.
+//! - `pixellab_create_tileset` — text → top-down tileable tileset PNG (sync; REST endpoint unverified).
 //!
 //! Live API vs OpenAPI spec discrepancies (logged 2026-08-04) — see source comments:
 //!   1. `/v2/image-to-pixelart` requires BOTH `image_size` AND `output_size`.
@@ -361,6 +364,207 @@ pub async fn pixellab_character_rotation_urls(
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(out)
+}
+
+/// POST /v2/animate-character — async. Submit v3 walk-animation jobs, one per direction.
+/// Returns `[(direction, job_id)]` — poll each job_id via `poll_character`.
+///
+/// **v3 mode** (default when no `template_animation_id`): custom `animation_description`,
+/// `frame_count` 4–16 (must be even). `directions` defaults to south only — pass
+/// `["south","north","east","west"]` explicitly for 4-direction animation.
+///
+/// `keep_first_frame=false` → exactly `frame_count` frames stored (not +1 reference frame).
+/// Cost ≈ `ceil(w*h*frames/65536)` per direction; 48×48×4 ≈ $0.0129/direction.
+///
+/// Live API returns `{ background_job_ids: [per direction], directions: [...], status }`.
+/// (Equivalent path: POST /v2/characters/animations — see docs/reference/pixellab-api.md §四.)
+pub async fn pixellab_animate_character(
+    http: &Client,
+    key: &str,
+    character_id: &str,
+    directions: &[&str],
+    frame_count: u32,
+    action_desc: &str,
+) -> Result<Vec<(String, String)>> {
+    let body = json!({
+        "character_id": character_id,
+        "mode": "v3",
+        "directions": directions,
+        "frame_count": frame_count,
+        // action_description: only describe the ACTION ("walk"), never the environment.
+        "action_description": action_desc,
+        "keep_first_frame": false,
+    });
+    let resp: serde_json::Value = http
+        .post(format!("{PIXELLAB_BASE}/animate-character"))
+        .bearer_auth(key)
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()
+        .context("animate-character 4xx/5xx")?
+        .json()
+        .await?;
+
+    // Live API returns background_job_ids (plural array) + directions (parallel array).
+    let job_ids = resp["background_job_ids"]
+        .as_array()
+        .ok_or_else(|| anyhow!("no background_job_ids in animate response: {resp}"))?;
+    let dirs = resp["directions"]
+        .as_array()
+        .ok_or_else(|| anyhow!("no directions in animate response: {resp}"))?;
+
+    // Zip directions ↔ job_ids (parallel arrays, one entry per direction).
+    let mut out = Vec::new();
+    for (d, j) in dirs.iter().zip(job_ids.iter()) {
+        let dir_name = d
+            .as_str()
+            .ok_or_else(|| anyhow!("animate direction not a string: {d}"))?
+            .to_string();
+        let job_id = j
+            .as_str()
+            .ok_or_else(|| anyhow!("animate job_id not a string: {j}"))?
+            .to_string();
+        out.push((dir_name, job_id));
+    }
+    Ok(out)
+}
+
+/// GET /v2/characters/{id} → `animations` (per-direction animation frame URLs).
+/// Returns `[(direction, [frame_url, ...])]`. Called after `animate_character` jobs complete.
+/// Empty if the character has no animations yet (caller falls back to `rotation_urls`).
+///
+/// The `animations` field shape (verified live 2026-08-13): an **array of
+/// animation groups**, each `{ animation_type, directions: [{ direction,
+/// frame_count, frames: [url, ...] }] }`. We parse tolerantly:
+///   - array of animation groups with nested `directions`  (actual live shape)
+///   - array of flat `{ direction, frames }` entries        (legacy fallback)
+///   - object keyed by direction → array of URL strings     (fallback)
+///   - object keyed by direction → `{ frames: [url, ...] }` (fallback)
+///
+/// Unknown shapes → empty result (caller falls back to single-frame `rotation_urls`).
+pub async fn pixellab_character_animations(
+    http: &Client,
+    key: &str,
+    character_id: &str,
+) -> Result<Vec<(String, Vec<String>)>> {
+    let v: serde_json::Value = http
+        .get(format!("{PIXELLAB_BASE}/characters/{character_id}"))
+        .bearer_auth(key)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+
+    let anim = &v["animations"];
+    let mut out = Vec::new();
+
+    // Shape 1/2: object keyed by direction name.
+    if let Some(obj) = anim.as_object() {
+        for (dir, val) in obj {
+            let urls = frame_url_list(val);
+            if !urls.is_empty() {
+                out.push((dir.clone(), urls));
+            }
+        }
+    }
+    // Shape 3: array. Each entry is either a flat direction entry
+    // `{ direction, frames }` or an animation group
+    // `{ animation_type, directions: [{ direction, frame_count, frames }] }`
+    // (the latter is the actual live-API shape as of 2026-08-13).
+    if let Some(arr) = anim.as_array() {
+        for entry in arr {
+            // Animation-group shape: nested `directions` array.
+            if let Some(dirs) = entry.get("directions").and_then(|d| d.as_array()) {
+                for d in dirs {
+                    let dir = d["direction"].as_str().unwrap_or("").to_string();
+                    if dir.is_empty() {
+                        continue;
+                    }
+                    let urls = frame_url_list(&d["frames"]);
+                    if !urls.is_empty() {
+                        out.push((dir, urls));
+                    }
+                }
+                continue;
+            }
+            // Flat direction-entry shape: `{ direction, frames }`.
+            let dir = entry["direction"].as_str().unwrap_or("").to_string();
+            if dir.is_empty() {
+                continue;
+            }
+            let urls = frame_url_list(&entry["frames"]);
+            if !urls.is_empty() {
+                out.push((dir, urls));
+            }
+        }
+    }
+
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
+}
+
+/// Extract a list of URL strings from a JSON value, tolerantly:
+///   - array of strings → those strings
+///   - object with `"frames"` array → those strings
+///   - single string → `[that string]`
+///   - otherwise → empty
+fn frame_url_list(v: &serde_json::Value) -> Vec<String> {
+    if let Some(arr) = v.as_array() {
+        return arr
+            .iter()
+            .filter_map(|s| s.as_str().map(String::from))
+            .collect();
+    }
+    if let Some(obj) = v.as_object() {
+        if let Some(frames) = obj.get("frames").and_then(|f| f.as_array()) {
+            return frames
+                .iter()
+                .filter_map(|s| s.as_str().map(String::from))
+                .collect();
+        }
+    }
+    if let Some(s) = v.as_str() {
+        return vec![s.to_string()];
+    }
+    Vec::new()
+}
+
+/// POST /v2/create-tileset — synchronous. Returns tileset PNG bytes.
+///
+/// Generates a top-down tileable tileset from a text description.
+/// `tile_size`: 16 or 32 (see docs/reference/pixellab-api.md §七 cost table).
+///
+/// ⚠️ REST endpoint name/params UNVERIFIED against live API. The MCP function is
+/// `create_topdown_tileset`; the REST path `/v2/create-tileset` and body shape
+/// `{description, tile_size}` are best-effort. If the endpoint returns 422, it
+/// doesn't exist or the params differ — callers should fall back to
+/// `pixellab_create_image_pixen` at 256×256 and log a note.
+pub async fn pixellab_create_tileset(
+    http: &Client,
+    key: &str,
+    description: &str,
+    tile_size: u32,
+) -> Result<Vec<u8>> {
+    let body = json!({
+        "description": description,
+        "tile_size": tile_size,
+    });
+    let resp = http
+        .post(format!("{PIXELLAB_BASE}/create-tileset"))
+        .bearer_auth(key)
+        .json(&body)
+        .send()
+        .await?;
+    // 422 → REST endpoint doesn't exist or params differ; surface as Err.
+    let resp = resp
+        .error_for_status()
+        .context("create-tileset 4xx/5xx (REST endpoint may not exist; fall back to create-image-pixen)")?;
+    // Assume PixelImageResponse shape (like other sync image endpoints).
+    // If the shape differs, deserialization fails → Err (acceptable per task constraints).
+    let pr: PixelImageResponse = resp.json().await?;
+    Ok(B64.decode(&pr.image.base64)?)
 }
 
 // ───── types ─────

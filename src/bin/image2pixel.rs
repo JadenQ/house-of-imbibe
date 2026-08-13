@@ -8,6 +8,8 @@
 //!   vision    <image>                MiniMax-M3 → text → pixon           (NEW idea)
 //!   avatar    <image>                MiniMax-M3 → text → 4-dir character (NEW idea, async)
 //!   avatar-text <description>        text → 4-dir character              (async)
+//!   map      <prompt>                text → map background / tileset      (sync)
+//!   animate  <character_id>         4-dir walk animation for existing char (async)
 //!
 //! Env
 //! ───
@@ -32,7 +34,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use house_of_imbibe::pixelart as px;
 use house_of_imbibe::pixelart::Proportions;
-use tracing::info;
+use tracing::{info, warn};
 
 // ───── CLI ─────
 
@@ -71,7 +73,7 @@ enum Cmd {
     /// Async (30–80 s typical). Polls background job until done.
     Avatar {
         image: PathBuf,
-        #[arg(long, default_value_t = 64)]
+        #[arg(long, default_value_t = 48)]
         size: u32,
         #[arg(long, default_value = "mannequin", value_parser = px::parse_template)]
         template: String,
@@ -83,7 +85,7 @@ enum Cmd {
     /// Text-only avatar (no image): 4-direction character from a prompt.
     AvatarText {
         description: String,
-        #[arg(long, default_value_t = 64)]
+        #[arg(long, default_value_t = 48)]
         size: u32,
         #[arg(long, default_value = "mannequin", value_parser = px::parse_template)]
         template: String,
@@ -91,6 +93,24 @@ enum Cmd {
         proportions: Proportions,
         #[arg(long, default_value_t = false)]
         skip_proportions: bool,
+    },
+    /// Generate a map background (standard: create-image-pixen 256×256) or
+    /// tileset (create-tileset, REST endpoint unverified — falls back to pixen on 422).
+    Map {
+        prompt: String,
+        #[arg(long, default_value = "standard")]
+        kind: String,
+        #[arg(long, default_value_t = 256)]
+        size: u32,
+    },
+    /// Animate an existing character's walk cycle (4 directions, v3 mode).
+    /// Requires a character_id from a prior `avatar` / `avatar-text` run.
+    Animate {
+        character_id: String,
+        #[arg(long, default_value_t = 4)]
+        frame_count: u32,
+        #[arg(long, default_value = "walk")]
+        action: String,
     },
 }
 
@@ -187,6 +207,92 @@ async fn main() -> Result<()> {
                 &out_dir,
             )
             .await?;
+        }
+        Cmd::Map { prompt, kind, size } => {
+            match kind.as_str() {
+                "standard" => {
+                    info!("map standard: {size}×{size}, prompt={prompt:?}");
+                    let png = px::pixellab_create_image_pixen(
+                        &http, &pixellab_key, &prompt, size,
+                    )
+                    .await?;
+                    let out = out_dir.join(format!("map-standard-{size}px.png"));
+                    std::fs::write(&out, &png)?;
+                    println!("OK  saved {} ({} bytes)", out.display(), png.len());
+                }
+                "tileset" => {
+                    // tile_size only 16/32; if user passed a large `size`, clamp to 32.
+                    let tile_size = if size <= 32 { size } else { 32 };
+                    info!("map tileset: tile_size={tile_size}, prompt={prompt:?}");
+                    match px::pixellab_create_tileset(
+                        &http, &pixellab_key, &prompt, tile_size,
+                    )
+                    .await
+                    {
+                        Ok(png) => {
+                            let out = out_dir.join(format!("map-tileset-{tile_size}px.png"));
+                            std::fs::write(&out, &png)?;
+                            println!("OK  saved {} ({} bytes)", out.display(), png.len());
+                        }
+                        Err(e) => {
+                            // REST /v2/create-tileset may not exist (422) — fall back.
+                            warn!("create-tileset failed: {e}");
+                            warn!("falling back to create-image-pixen 256×256");
+                            let png = px::pixellab_create_image_pixen(
+                                &http, &pixellab_key, &prompt, 256,
+                            )
+                            .await?;
+                            let out = out_dir.join("map-tileset-fallback-256px.png");
+                            std::fs::write(&out, &png)?;
+                            println!(
+                                "OK  saved {} ({} bytes, fallback)",
+                                out.display(),
+                                png.len()
+                            );
+                        }
+                    }
+                }
+                other => {
+                    anyhow::bail!("unknown map kind `{other}` (use 'standard' or 'tileset')");
+                }
+            }
+        }
+        Cmd::Animate { character_id, frame_count, action } => {
+            info!(
+                "animate: character_id={character_id}, frame_count={frame_count}, action={action}"
+            );
+            let dir_jobs = px::pixellab_animate_character(
+                &http,
+                &pixellab_key,
+                &character_id,
+                &["south", "north", "east", "west"],
+                frame_count,
+                &action,
+            )
+            .await?;
+            info!("submitted {} direction jobs", dir_jobs.len());
+            for (dir, job_id) in &dir_jobs {
+                info!("  polling {dir} job {job_id}...");
+                let _ = px::poll_character(&http, &pixellab_key, job_id, 60).await?;
+                info!("  {dir} done");
+            }
+            let anims =
+                px::pixellab_character_animations(&http, &pixellab_key, &character_id).await?;
+            let dir = out_dir.join(format!("animate-{character_id}"));
+            std::fs::create_dir_all(&dir)?;
+            for (dir_name, urls) in &anims {
+                for (i, url) in urls.iter().enumerate() {
+                    let png = http.get(url).send().await?.bytes().await?;
+                    let out = dir.join(format!("{dir_name}_{i}.png"));
+                    std::fs::write(&out, &png)?;
+                    info!("  ↓ {} ({} bytes)", out.display(), png.len());
+                }
+            }
+            println!(
+                "OK  animate {character_id} saved to {} ({} directions)",
+                dir.display(),
+                anims.len()
+            );
         }
     }
     Ok(())

@@ -251,23 +251,23 @@ fn whitelist(v: Option<&str>, allowed: &[&'static str], fallback: &'static str) 
     fallback
 }
 
-/// 校验 slot ∈ {back, hand}（accessories 只有两槽位）。
+/// 校验 slot ∈ {back, hand, hat, face}（accessories 四槽位；hat/face=帽/眼镜面饰）。
 fn validate_slot(slot: &str) -> Result<(), ApiError> {
-    if slot != "back" && slot != "hand" {
-        return Err(ApiError(StatusCode::BAD_REQUEST, "slot must be 'back' or 'hand'".into()));
+    if !matches!(slot, "back" | "hand" | "hat" | "face") {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "slot must be 'back', 'hand', 'hat', or 'face'".into()));
     }
     Ok(())
 }
 
-/// 校验 equipped 数组结构：每项 slot ∈ {back, hand}；至多 2 项（每 slot 一条）。
+/// 校验 equipped 数组结构：每项 slot ∈ {back, hand, hat, face}；至多 4 项（每 slot 一条）。
 /// 用于 put_avatar 透传（不剥离，像样式字段一样）。equipped 由 equip 端点写入，
 /// 这里只做结构校验防注入任意大 JSON。
 fn validate_equipped(equipped: &serde_json::Value) -> Result<serde_json::Value, ApiError> {
     let arr = equipped
         .as_array()
         .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "equipped must be an array".into()))?;
-    if arr.len() > 2 {
-        return Err(ApiError(StatusCode::BAD_REQUEST, "equipped has at most 2 items".into()));
+    if arr.len() > 4 {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "equipped has at most 4 items".into()));
     }
     for item in arr {
         let slot = item
@@ -341,7 +341,7 @@ pub async fn put_avatar(
 // ---------- accessories（equip/unequip）----------
 
 /// POST /api/avatar/equip {slot, asset_id} → 200 {avatar: config_json}。
-/// 校验 slot ∈ {back,hand} + asset 存在且 owner_id=自己 → 查 storage_key 作
+/// 校验 slot ∈ {back,hand,hat,face} + asset 存在且 owner_id=自己 → 查 storage_key 作
 /// asset_key → equipped 里替换同 slot（或追加）→ UPDATE config_json。
 /// kind=modular 或 generated 都允许（D4，不拒绝 generated）。
 #[derive(Deserialize)]
@@ -457,7 +457,7 @@ pub async fn avatar_unequip(
 
 // ---------- 形象生成（照片 → PixelLab 4方向） ----------
 
-const AVATAR_SIZE: u32 = 64;
+const AVATAR_SIZE: u32 = 48;
 const AVATAR_TEMPLATE: &str = "mannequin";
 
 /// POST /api/avatar/generate — multipart {image} → 异步 job → { job_id }
@@ -594,6 +594,7 @@ pub async fn run_generation_job(state: &AppState, job_id: &str) -> anyhow::Resul
     match kind.as_str() {
         "avatar" => run_avatar_body(state, job_id, owner_id, params).await,
         "map_bg" => run_map_bg_body(state, job_id, owner_id, params).await,
+        "map_tileset" => run_map_tileset_body(state, job_id, owner_id, params).await,
         other => {
             finish_job_failed(state, job_id, None, &format!("unknown kind: {other}")).await;
         }
@@ -703,7 +704,8 @@ async fn run_map_bg_body(
 
 /// 地图背景图生成：文字 → create-image-pixen（同步）→ PNG bytes → AssetStore
 /// → INSERT assets → UPDATE maps.bg_key。返回 asset_id（generation_jobs.result_asset_id）。
-/// 240×160 适配地图逻辑分辨率；行走网格（grid.rs）不变。
+/// 256×256 标准尺寸档（240×160 非标准导致质量差，见 docs/reference/pixellab-api.md §七）；
+/// 前端 BarScene.loadBgImage 已 setDisplaySize 到 240×160 拉伸显示，行走网格（grid.rs）不变。
 async fn map_bg_pipeline(
     state: &AppState,
     job_id: &str,
@@ -712,13 +714,14 @@ async fn map_bg_pipeline(
     prompt: &str,
     pixellab_key: &str,
 ) -> anyhow::Result<String> {
-    // 1. 调 create-image-pixen（同步 ~30-120s，240×160 适配逻辑分辨率）
+    // 1. 调 create-image-pixen（同步 ~30-120s，256×256 标准档；GBA 锁风格）
     let full = format!(
-        "{prompt}. GBA Emerald-era 16-bit pixel art, retro game bar interior background, \
-         limited color palette, top-down 3/4 view, no characters."
+        "{prompt}. GBA Emerald-era 16-bit pixel art, retro game bar interior, wooden floor \
+         and bar counter with shelves of bottles, stools and tables scattered around, warm \
+         dim ambient lighting, limited color palette, top-down 3/4 view, no characters."
     );
     let png_bytes = px::pixellab_create_image_pixen_wh(
-        &state.http, pixellab_key, &full, 240, 160,
+        &state.http, pixellab_key, &full, 256, 256,
     )
     .await?;
 
@@ -757,6 +760,89 @@ async fn map_bg_pipeline(
     Ok(asset_id)
 }
 
+/// map_tileset job body：认领后的 tileset 生成逻辑。
+/// ⚠️ REST /v2/create-tileset 端点未实测；422/失败 → job failed 但不崩服务。
+async fn run_map_tileset_body(
+    state: &AppState,
+    job_id: &str,
+    owner_id: i64,
+    params: serde_json::Value,
+) {
+    let prompt = params["prompt"].as_str().unwrap_or("").to_string();
+    let tile_size = params["tile_size"].as_u64().unwrap_or(32) as u32;
+
+    let Some(key) = state.pixellab_key.as_deref() else {
+        finish_job_failed(state, job_id, None, "not configured").await;
+        return;
+    };
+    if prompt.trim().is_empty() {
+        finish_job_failed(state, job_id, None, "empty prompt").await;
+        return;
+    }
+
+    match map_tileset_pipeline(state, job_id, owner_id, &prompt, tile_size, key).await {
+        Ok(asset_id) => {
+            sqlx::query(
+                "UPDATE generation_jobs SET status='done', result_asset_id=?, completed_at=? WHERE id=?",
+            )
+            .bind(&asset_id)
+            .bind(now_ts())
+            .bind(job_id)
+            .execute(&state.db)
+            .await
+            .ok();
+            info!("map_tileset job {job_id} done, asset_id={asset_id}");
+        }
+        Err(e) => {
+            finish_job_failed(state, job_id, None, &e.to_string()).await;
+        }
+    }
+}
+
+/// tileset 生成：文字 → create-tileset（同步）→ PNG bytes → AssetStore → INSERT assets。
+/// 返回 asset_id。⚠️ REST 端点未实测；若 422 返回 Err，job 标记 failed。
+async fn map_tileset_pipeline(
+    state: &AppState,
+    job_id: &str,
+    owner_id: i64,
+    prompt: &str,
+    tile_size: u32,
+    pixellab_key: &str,
+) -> anyhow::Result<String> {
+    let full = format!(
+        "{prompt}. GBA Emerald-era 16-bit pixel art, top-down tileable floor and wall tiles."
+    );
+    let png_bytes = px::pixellab_create_tileset(
+        &state.http, pixellab_key, &full, tile_size,
+    )
+    .await?;
+
+    // 存储 PNG 到 AssetStore（存 key 不存 URL）
+    let storage_key = format!("map/tileset/{job_id}.png");
+    state
+        .assets
+        .put(&storage_key, &png_bytes)
+        .await
+        .map_err(|e| anyhow::anyhow!("asset put {storage_key}: {e}"))?;
+
+    let asset_id = crate::assets::random_asset_id();
+    let meta = json!({ "prompt": prompt, "tile_size": tile_size });
+    sqlx::query(
+        "INSERT INTO assets (id, owner_id, kind, storage_key, meta_json, created_at)
+         VALUES (?, ?, 'map_tileset', ?, ?, ?)",
+    )
+    .bind(&asset_id)
+    .bind(owner_id)
+    .bind(&storage_key)
+    .bind(meta.to_string())
+    .bind(now_ts())
+    .execute(&state.db)
+    .await?;
+
+    info!("map_tileset pipeline done: asset_id={asset_id}, key={storage_key}");
+    Ok(asset_id)
+}
+
 /// 标记 job failed + 删除临时照片（如果提供）。
 async fn finish_job_failed(state: &AppState, job_id: &str, photo_key: Option<&str>, error: &str) {
     if let Some(pk) = photo_key {
@@ -788,8 +874,10 @@ async fn avatar_pipeline(
 }
 
 /// 从文字描述生成 4 方向角色：create-character-with-4-directions → poll →
-/// 下载 rotation PNG → AssetStore → 存 frames 契约。返回 asset_id。
+/// 下载 rotation PNG → animate-character（4 方向行走动画）→ 下载动画帧 →
+/// 存 frames 契约。返回 asset_id。
 /// 照片路径（vision 描述后）与文字路径（直接描述）共用此函数。
+/// animate 失败时 fallback 到单帧静站（frames:{dir:[key]}），不阻断形象创建。
 async fn generate_from_description(
     state: &AppState,
     owner_id: i64,
@@ -812,20 +900,38 @@ async fn generate_from_description(
     let urls = px::pixellab_character_rotation_urls(&state.http, pixellab_key, &character_id).await?;
     info!("character {character_id} done, {} directions", urls.len());
 
-    // 4. 下载每个 rotation PNG → AssetStore → frames 契约
-    //    每方向帧 key 数组（1 帧=静站，3 帧=行走。当前只出 1 静态帧；
-    //    animate-character 步骤将补 3 行走帧——见 issue #0010 / CLAUDE.md。）
-    let mut frames: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+    // 4. 下载每个 rotation PNG → AssetStore → 单帧 key（animate 失败时的 fallback）
+    //    每方向先存 1 张静站帧；animate 步骤（下一步）成功后覆盖为多帧。
+    let mut single_keys: Vec<(String, String)> = Vec::new();
     for (dir, url) in &urls {
         let png_bytes = state.http.get(url).send().await?.error_for_status()?.bytes().await?;
         let key = format!("avatar/{owner_id}/{dir}.png");
         state.assets.put(&key, &png_bytes).await
             .map_err(|e| anyhow::anyhow!("asset put {key}: {e}"))?;
-        frames.insert(dir.clone(), json!([key]));
+        single_keys.push((dir.clone(), key));
+    }
+
+    // 5. animate-character：4 方向行走动画（v3, 4 帧/方向, keep_first_frame=false）
+    //    成功 → frames:{dir:[key×4]}（帧0=静站, 帧1-3=行走）。
+    //    失败（422/余额不足/超时）→ fallback 到单帧 frames:{dir:[key]}，不阻断形象创建。
+    let anim_result = animate_walk_frames(state, owner_id, &character_id, pixellab_key).await;
+    let mut frames: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+    match anim_result {
+        Ok(multi) if !multi.is_empty() => {
+            for (dir, keys) in &multi {
+                frames.insert(dir.clone(), json!(keys));
+            }
+        }
+        _ => {
+            // fallback: 单帧静站（rotation PNG 已存好）
+            for (dir, key) in &single_keys {
+                frames.insert(dir.clone(), json!([key]));
+            }
+        }
     }
     let frames_val = serde_json::Value::Object(frames);
 
-    // 5. asset 记录（result_asset_id 指向它）
+    // 6. asset 记录（result_asset_id 指向它）
     let asset_id = crate::assets::random_asset_id();
     let meta = json!({ "character_id": character_id, "frames": frames_val.clone() });
     sqlx::query(
@@ -839,7 +945,7 @@ async fn generate_from_description(
     .execute(&state.db)
     .await?;
 
-    // 6. avatars.config_json（存 key 不存 URL；契约 frames:{dir:[key…]}）
+    // 7. avatars.config_json（存 key 不存 URL；契约 frames:{dir:[key…]}）
     let config = json!({
         "kind": "generated",
         "character_id": character_id,
@@ -856,6 +962,63 @@ async fn generate_from_description(
     .await?;
 
     Ok(asset_id)
+}
+
+/// Animate a character's walk cycle (4 directions, 4 frames each) and store
+/// the animation frames in AssetStore. Returns `[(dir, [key, ...])]` — empty on failure.
+///
+/// v3 mode, frame_count=4, keep_first_frame=false → exactly 4 frames per direction.
+/// Cost ≈ $0.0129/direction × 4 ≈ $0.052. If animate fails (422, insufficient
+/// balance, timeout, etc.), returns empty Vec — caller falls back to single-frame
+/// rotation_urls (already stored in `generate_from_description` step 4).
+///
+/// Frame keys: `avatar/{owner_id}/{dir}_{i}.png` (i = 0..3).
+/// frames 契约: frames:{dir:[key0,key1,key2,key3]} — 帧0=静站, 帧1-3=行走。
+async fn animate_walk_frames(
+    state: &AppState,
+    owner_id: i64,
+    character_id: &str,
+    pixellab_key: &str,
+) -> anyhow::Result<Vec<(String, Vec<String>)>> {
+    // 1. 提交 animate jobs（每方向一个 background job）
+    let dir_jobs = px::pixellab_animate_character(
+        &state.http, pixellab_key, character_id,
+        &["south", "north", "east", "west"], 4, "walk",
+    ).await?;
+    info!("  animate submitted: {} direction jobs for character {character_id}", dir_jobs.len());
+
+    // 2. 轮询每个方向 job 到完成（复用 poll_character，5s 间隔，最多 60 次=5min）
+    for (dir, job_id) in &dir_jobs {
+        let _ = px::poll_character(&state.http, pixellab_key, job_id, 60).await
+            .map_err(|e| anyhow::anyhow!("animate poll {dir}: {e}"))?;
+    }
+    info!("  animate jobs done for character {character_id}");
+
+    // 3. GET /v2/characters/{id} → animations（每方向动画帧 URL 列表）
+    let anims = px::pixellab_character_animations(
+        &state.http, pixellab_key, character_id,
+    ).await?;
+    if anims.is_empty() {
+        anyhow::bail!("no animations returned for character {character_id}");
+    }
+
+    // 4. 下载每帧 PNG → AssetStore → 收集 key
+    let mut out = Vec::new();
+    for (dir, urls) in &anims {
+        let mut keys = Vec::new();
+        for (i, url) in urls.iter().enumerate() {
+            let png_bytes = state.http.get(url).send().await?
+                .error_for_status()?.bytes().await?;
+            let key = format!("avatar/{owner_id}/{dir}_{i}.png");
+            state.assets.put(&key, &png_bytes).await
+                .map_err(|e| anyhow::anyhow!("asset put {key}: {e}"))?;
+            keys.push(key);
+        }
+        if !keys.is_empty() {
+            out.push((dir.clone(), keys));
+        }
+    }
+    Ok(out)
 }
 
 /// GET /api/avatar/generate/{job_id} — 轮询 job 状态（读 generation_jobs 表，DB 为唯一真相源）
@@ -881,6 +1044,44 @@ pub async fn avatar_generate_poll(
     Ok(Json(AvatarJobStatus { status, error }))
 }
 
+// ---------- 形象 job 列表 ----------
+
+/// GET /api/avatar/jobs → 200 [{id, kind, status, params_json?, created_at}]
+/// 列当前用户自己的形象生成 job（按 created_at DESC）。status 对齐 DB 枚举
+/// （pending/running/done/failed）。params_json 原样解析回 JSON（可能含 photo_key
+/// 等临时信息，仅 owner 可见）。
+pub async fn avatar_list_jobs(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
+    let (id, _, _) = current_user(&state, &headers)
+        .await
+        .ok_or(ApiError(StatusCode::UNAUTHORIZED, "not logged in".into()))?;
+    let rows = sqlx::query_as::<_, (String, String, String, Option<String>, i64)>(
+        "SELECT id, kind, status, params_json, created_at FROM generation_jobs
+         WHERE owner_id = ? ORDER BY created_at DESC",
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await?;
+    let jobs = rows
+        .iter()
+        .map(|(id, kind, status, params_json, created_at)| {
+            let params: Option<serde_json::Value> = params_json
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok());
+            json!({
+                "id": id,
+                "kind": kind,
+                "status": status,
+                "params_json": params,
+                "created_at": created_at,
+            })
+        })
+        .collect();
+    Ok(Json(jobs))
+}
+
 // ---------- map（视觉背景层）----------
 
 /// GET /api/map?scene=bar 和 GET /api/admin/map?scene=bar 的查询参数。
@@ -896,21 +1097,26 @@ pub struct MapRegenerateRequest {
     pub scene: Option<String>,
 }
 
-/// 查地图行 → {scene, width, height, bg_key}。不存在 → 404。
+/// 查地图行 → {scene, width, height, bg_key, walkable}。不存在 → 404。
+/// walkable = JSON 2D 数组（0=可走,1=阻挡）；NULL → null（前端用静态 BAR_MAP 兜底）。
 async fn fetch_map(state: &AppState, scene: &str) -> Result<serde_json::Value, ApiError> {
-    let row: Option<(String, i64, i64, Option<String>)> = sqlx::query_as(
-        "SELECT scene, width, height, bg_key FROM maps WHERE scene = ?",
+    let row = sqlx::query_as::<_, (String, i64, i64, Option<String>, Option<String>)>(
+        "SELECT scene, width, height, bg_key, walkable FROM maps WHERE scene = ?",
     )
     .bind(scene)
     .fetch_optional(&state.db)
     .await?;
-    let (scene, width, height, bg_key) = row
+    let (scene, width, height, bg_key, walkable_str) = row
         .ok_or(ApiError(StatusCode::NOT_FOUND, "scene not found".into()))?;
+    let walkable: Option<serde_json::Value> = walkable_str
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok());
     Ok(json!({
         "scene": scene,
         "width": width,
         "height": height,
         "bg_key": bg_key,
+        "walkable": walkable,
     }))
 }
 
@@ -974,6 +1180,103 @@ pub async fn admin_map_regenerate(
     Ok((StatusCode::ACCEPTED, Json(json!({ "job_id": job_id }))).into_response())
 }
 
+/// POST /api/admin/map/tileset {prompt, tile_size?} → 202 {job_id}（admin 403 门禁）。
+/// 生成 top-down 可拼接 tileset → 存 assets。复用 generation_jobs 异步。
+/// ⚠️ REST /v2/create-tileset 端点未实测确认；若 API 返回 422 job 会失败但不崩。
+#[derive(Deserialize)]
+pub struct MapTilesetRequest {
+    pub prompt: String,
+    #[serde(default = "default_tile_size")]
+    pub tile_size: u32,
+}
+
+fn default_tile_size() -> u32 {
+    32
+}
+
+pub async fn admin_map_tileset(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<MapTilesetRequest>,
+) -> Result<Response, ApiError> {
+    let admin_id = require_admin(&state, &headers).await?;
+    let prompt = body.prompt.trim();
+    if prompt.is_empty() {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "prompt required".into()));
+    }
+    if prompt.chars().count() > 2000 {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "prompt too long (max 2000 chars)".into()));
+    }
+    // tile_size 只接受 16/32（docs/reference/pixellab-api.md §七 cost table）
+    let tile_size = match body.tile_size {
+        16 | 32 => body.tile_size,
+        _ => 32, // 非法值 → 默认 32
+    };
+    let job_id = crate::assets::random_asset_id();
+    let params = json!({ "prompt": prompt, "tile_size": tile_size });
+    sqlx::query(
+        "INSERT INTO generation_jobs (id, owner_id, kind, status, params_json, created_at)
+         VALUES (?, ?, 'map_tileset', 'pending', ?, ?)",
+    )
+    .bind(&job_id)
+    .bind(admin_id)
+    .bind(params.to_string())
+    .bind(now_ts())
+    .execute(&state.db)
+    .await?;
+
+    let state2 = state.clone();
+    let jid = job_id.clone();
+    tokio::spawn(async move {
+        if let Err(e) = run_generation_job(&state2, &jid).await {
+            warn!("map_tileset job {jid} worker error: {e}");
+        }
+    });
+
+    Ok((StatusCode::ACCEPTED, Json(json!({ "job_id": job_id }))).into_response())
+}
+
+/// PUT /api/admin/map/walkable {scene, walkable} → 204。
+/// walkable = 2D 数组（0=可走,1=阻挡）。校验结构后存 JSON 文本到 maps.walkable。
+/// 场景不存在 → 404。
+#[derive(Deserialize)]
+pub struct WalkableRequest {
+    pub scene: String,
+    pub walkable: serde_json::Value,
+}
+
+pub async fn admin_set_walkable(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<WalkableRequest>,
+) -> Result<StatusCode, ApiError> {
+    require_admin(&state, &headers).await?;
+    // walkable 必须是 2D 数组，每格 0 或 1（防注入任意大 JSON）。
+    let grid = body.walkable.as_array()
+        .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "walkable must be a 2D array".into()))?;
+    for row in grid {
+        let r = row.as_array()
+            .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "walkable rows must be arrays".into()))?;
+        for cell in r {
+            let n = cell.as_i64()
+                .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "walkable cells must be 0 or 1".into()))?;
+            if n != 0 && n != 1 {
+                return Err(ApiError(StatusCode::BAD_REQUEST, "walkable cells must be 0 or 1".into()));
+            }
+        }
+    }
+    let res = sqlx::query("UPDATE maps SET walkable = ?, updated_at = ? WHERE scene = ?")
+        .bind(body.walkable.to_string())
+        .bind(now_ts())
+        .bind(&body.scene)
+        .execute(&state.db)
+        .await?;
+    if res.rows_affected() == 0 {
+        return Err(ApiError(StatusCode::NOT_FOUND, "scene not found".into()));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // ---------- 资产服务 ----------
 
 /// GET /api/assets/:key — 返回字节流 + 按扩展名 content-type。
@@ -999,26 +1302,191 @@ pub async fn serve_asset(
 }
 
 // ---------- 酒单 ----------
-pub async fn get_menu() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "id": "house-menu",
-        "sections": [
-            { "title": "Signature Cocktails", "items": [
-                { "name": "Imbibe Old Fashioned", "desc": "Bourbon, bitters, a whisper of smoke", "price": 12 },
-                { "name": "Pixel Sour", "desc": "Gin, lemon, egg white, 8-bit cherry", "price": 11 },
-                { "name": "Mosaic Mule", "desc": "Vodka, ginger beer, lime, copper mug", "price": 10 }
-            ]},
-            { "title": "Classics", "items": [
-                { "name": "Negroni", "desc": "Gin, Campari, sweet vermouth", "price": 11 },
-                { "name": "Margarita", "desc": "Tequila, lime, triple sec, salt rim", "price": 10 },
-                { "name": "Espresso Martini", "desc": "Vodka, coffee liqueur, fresh espresso", "price": 12 }
-            ]},
-            { "title": "Zero Proof", "items": [
-                { "name": "Garden Spritz", "desc": "Cucumber, mint, soda", "price": 7 },
-                { "name": "Berry Fizz", "desc": "Mixed berries, lemon, tonic", "price": 7 }
-            ]}
-        ]
-    }))
+
+/// GET /api/menu → 200 {id, sections:[{title, items:[{name, desc, price}]}]}
+/// 从 menu_items 读 visible=1，按 section, sort_order 组装。保持前端 MenuData 契约不变
+/// （只读看单，不下单，见 design 定稿）。
+pub async fn get_menu(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let rows = sqlx::query_as::<_, (String, String, String, i64, i64)>(
+        "SELECT section, name, description, price, sort_order FROM menu_items
+         WHERE visible = 1 ORDER BY section, sort_order",
+    )
+    .fetch_all(&state.db)
+    .await?;
+    // 按 section 分组（ORDER BY section 已排序，首遇新 section 即开新组）。
+    let mut sections: Vec<serde_json::Value> = Vec::new();
+    let mut cur_title: Option<String> = None;
+    let mut cur_items: Vec<serde_json::Value> = Vec::new();
+    for (section, name, desc, price, _sort) in rows {
+        if cur_title.as_deref() != Some(section.as_str()) {
+            if let Some(t) = cur_title.take() {
+                sections.push(json!({ "title": t, "items": cur_items }));
+                cur_items = Vec::new();
+            }
+            cur_title = Some(section);
+        }
+        cur_items.push(json!({ "name": name, "desc": desc, "price": price }));
+    }
+    if let Some(t) = cur_title.take() {
+        sections.push(json!({ "title": t, "items": cur_items }));
+    }
+    Ok(Json(json!({ "id": "house-menu", "sections": sections })))
+}
+
+// ---------- 酒单 CRUD（admin）----------
+
+/// POST/PUT /api/admin/menu 请求体。id 由服务端生成（random_asset_id）；
+/// description/price/sort_order/visible 可选，缺失走 DB 默认。
+#[derive(Deserialize)]
+pub struct MenuInput {
+    pub section: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub price: Option<i64>,
+    pub sort_order: Option<i64>,
+    pub visible: Option<i64>,
+}
+
+/// GET /api/admin/menu → 200 [MenuItem 全量含 visible=0]（按 section, sort_order）。
+pub async fn admin_list_menu(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
+    require_admin(&state, &headers).await?;
+    let rows = sqlx::query_as::<_, (String, String, String, String, i64, i64, i64, i64)>(
+        "SELECT id, section, name, description, price, sort_order, visible, created_at
+         FROM menu_items ORDER BY section, sort_order",
+    )
+    .fetch_all(&state.db)
+    .await?;
+    let items = rows
+        .iter()
+        .map(|(id, section, name, desc, price, sort, visible, created)| {
+            json!({
+                "id": id,
+                "section": section,
+                "name": name,
+                "description": desc,
+                "price": price,
+                "sort_order": sort,
+                "visible": visible,
+                "created_at": created,
+            })
+        })
+        .collect();
+    Ok(Json(items))
+}
+
+/// POST /api/admin/menu {section, name, ...} → 201 {MenuItem}。id 用 random_asset_id。
+pub async fn admin_create_menu(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<MenuInput>,
+) -> Result<Response, ApiError> {
+    require_admin(&state, &headers).await?;
+    let section = body.section.trim();
+    let name = body.name.trim();
+    if section.is_empty() || name.is_empty() {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "section and name required".into()));
+    }
+    let description = body.description.unwrap_or_default();
+    let price = body.price.unwrap_or(0);
+    let sort_order = body.sort_order.unwrap_or(0);
+    let visible = body.visible.unwrap_or(1);
+    let created_at = now_ts();
+    let id = crate::assets::random_asset_id();
+    sqlx::query(
+        "INSERT INTO menu_items (id, section, name, description, price, sort_order, visible, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(section)
+    .bind(name)
+    .bind(&description)
+    .bind(price)
+    .bind(sort_order)
+    .bind(visible)
+    .bind(created_at)
+    .execute(&state.db)
+    .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "id": id,
+            "section": section,
+            "name": name,
+            "description": description,
+            "price": price,
+            "sort_order": sort_order,
+            "visible": visible,
+            "created_at": created_at,
+        })),
+    )
+        .into_response())
+}
+
+/// PUT /api/admin/menu/{id} {section, name, ...} → 200 {MenuItem}。不存在 → 404。
+pub async fn admin_update_menu(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<MenuInput>,
+) -> Result<Response, ApiError> {
+    require_admin(&state, &headers).await?;
+    let section = body.section.trim();
+    let name = body.name.trim();
+    if section.is_empty() || name.is_empty() {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "section and name required".into()));
+    }
+    let description = body.description.unwrap_or_default();
+    let price = body.price.unwrap_or(0);
+    let sort_order = body.sort_order.unwrap_or(0);
+    let visible = body.visible.unwrap_or(1);
+    let res = sqlx::query(
+        "UPDATE menu_items SET section=?, name=?, description=?, price=?, sort_order=?, visible=?
+         WHERE id=?",
+    )
+    .bind(section)
+    .bind(name)
+    .bind(&description)
+    .bind(price)
+    .bind(sort_order)
+    .bind(visible)
+    .bind(&id)
+    .execute(&state.db)
+    .await?;
+    if res.rows_affected() == 0 {
+        return Err(ApiError(StatusCode::NOT_FOUND, "menu item not found".into()));
+    }
+    Ok((StatusCode::OK, Json(json!({
+        "id": id,
+        "section": section,
+        "name": name,
+        "description": description,
+        "price": price,
+        "sort_order": sort_order,
+        "visible": visible,
+    })))
+        .into_response())
+}
+
+/// DELETE /api/admin/menu/{id} → 204；不存在 → 404。
+pub async fn admin_delete_menu(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    require_admin(&state, &headers).await?;
+    let res = sqlx::query("DELETE FROM menu_items WHERE id = ?")
+        .bind(&id)
+        .execute(&state.db)
+        .await?;
+    if res.rows_affected() == 0 {
+        return Err(ApiError(StatusCode::NOT_FOUND, "menu item not found".into()));
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn health() -> &'static str {
@@ -1254,6 +1722,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/members/{id}/unban", post(admin_unban))
         .route("/map", get(admin_get_map))
         .route("/map/regenerate", post(admin_map_regenerate))
+        .route("/map/tileset", post(admin_map_tileset))
+        .route("/map/walkable", put(admin_set_walkable))
+        .route(
+            "/menu",
+            get(admin_list_menu).post(admin_create_menu),
+        )
+        .route("/menu/{id}", put(admin_update_menu).delete(admin_delete_menu))
         .route(
             "/decorations",
             get(admin_list_decorations).post(admin_place_decoration),
@@ -1271,6 +1746,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/avatar/generate", post(avatar_generate_submit))
         .route("/avatar/generate-text", post(avatar_generate_text))
         .route("/avatar/generate/{job_id}", get(avatar_generate_poll))
+        .route("/avatar/jobs", get(avatar_list_jobs))
         .route("/assets/{key}", get(serve_asset))
         .route("/menu", get(get_menu))
         .route("/map", get(get_map))

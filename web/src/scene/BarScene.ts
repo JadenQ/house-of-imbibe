@@ -109,7 +109,9 @@ export class BarScene extends Phaser.Scene {
       if (m.type === "pong") {
         this.roomState = applyServerMsg(this.roomState, m, this.pendingPing);
       } else {
-        this.roomState = applyServerMsg(this.roomState, m);
+        // 注入客户端 performance.now()：chat 用作气泡 ts（age=nowMs-line.ts 纯客户端戳，
+        // 不依赖 clockOffset，修掉首条 pong 前气泡 age 为负的 bug）。
+        this.roomState = applyServerMsg(this.roomState, m, performance.now());
       }
     });
 
@@ -331,7 +333,7 @@ export class BarScene extends Phaser.Scene {
     // ── 装饰渲染（来自 RenderView.decorations；asset_key 非空→按 /api/assets/{key} 取 PNG，null→占位）──
     this.renderDecorations(view);
 
-    // ── 聊天气泡（每人最新一条，仍在 4s TTL 内即显示）──
+    // ── 聊天气泡（每人最新一条，仍在 BUBBLE_TTL_MS(7s) 内即显示）──
     this.renderBubbles(view);
 
     // ── 聊天侧栏（条数变化时刷新）──
@@ -361,7 +363,9 @@ export class BarScene extends Phaser.Scene {
     }
   }
 
-  /** 渲染聊天气泡：view.bubbles 已被 interpolate 过滤到 4s TTL 内；每人取最新。 */
+  /** 渲染聊天气泡：view.bubbles 已被 interpolate 过滤到 BUBBLE_TTL_MS(7s) 内；每人取最新。
+   *  样式：深色背景 #241c16 + 细描边 + 紧凑 padding + 自动换行(maxWidth 70)，240×160 整数缩放下偏小。
+   *  自己发言也显示（placeFor 的 selfId 分支返回本地玩家坐标）。 */
   private renderBubbles(view: RenderView) {
     const latest = new Map<number, string>();
     for (const b of view.bubbles) latest.set(b.playerId, b.text);
@@ -381,10 +385,15 @@ export class BarScene extends Phaser.Scene {
       if (!t) {
         t = this.add
           .text(0, 0, "", {
-            fontSize: "10px",
+            fontFamily: "'Courier New', ui-monospace, monospace",
+            fontSize: "7px",
             color: "#f0e0c0",
-            backgroundColor: "#14100e",
+            backgroundColor: "#241c16",
+            stroke: "#14100e",
+            strokeThickness: 1,
             padding: { x: 3, y: 2 },
+            align: "left",
+            wordWrap: { width: 70, useAdvancedWrap: true },
           })
           .setOrigin(0.5, 1)
           .setDepth(9999);

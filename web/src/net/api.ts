@@ -26,7 +26,7 @@ export interface ModularAvatar {
   bottomStyle?: string;
   /** 鞋样式：boots|sneakers|sandals */
   shoeStyle?: string;
-  /** 已装备配件（back/hand slot）；缺失 → 空（向后兼容） */
+  /** 已装备配件（back/hand/hat/face slot）；缺失 → 空（向后兼容） */
   equipped?: EquippedItem[];
 }
 
@@ -35,15 +35,17 @@ export interface GeneratedAvatar {
   kind: "generated";
   character_id: string;
   frames: Record<"south" | "north" | "west" | "east", string[]>;
-  /** 已装备配件（back/hand slot；D4 允许 generated 配件）；缺失 → 空（向后兼容） */
+  /** 已装备配件（back/hand/hat/face slot；D4 允许 generated 配件）；缺失 → 空（向后兼容） */
   equipped?: EquippedItem[];
 }
 
 /** 已装备配件条目（存 config_json，equip 时 JOIN 查 asset_key 存入供前端直接拼 /api/assets/{asset_key}）。
  *  asset_key = 该 asset 的 storage_key；null = 无资产 / 占位。
  *  每 slot 至多一条。 */
+export type EquipSlot = "back" | "hand" | "hat" | "face";
+
 export interface EquippedItem {
-  slot: "back" | "hand";
+  slot: EquipSlot;
   asset_id: string | null;
   asset_key: string | null;
 }
@@ -61,17 +63,54 @@ export interface MenuPayload {
   sections: { title: string; items: MenuItem[] }[];
 }
 
+/** admin 酒单全量行（含 visible=0 隐藏项）。与公开 MenuItem（name/desc/price 投影）区分。 */
+export interface AdminMenuItem {
+  id: string;
+  section: string;
+  name: string;
+  description: string;
+  price: number;
+  sort_order: number;
+  visible: number;
+  created_at: number;
+}
+
+/** POST/PUT /api/admin/menu 请求体。id 由服务端生成；可选字段缺失走 DB 默认。 */
+export interface MenuInput {
+  section: string;
+  name: string;
+  description?: string;
+  price?: number;
+  sort_order?: number;
+  visible?: number;
+}
+
 export interface AvatarJobStatus {
   status: "pending" | "running" | "done" | "failed";
   error?: string;
 }
 
-/** 地图视觉背景层信息。bg_key = assets.storage_key（null = 用静态 tile 渲染兜底）。 */
+/** 形象生成 job 列表项（GET /api/avatar/jobs）。status 对齐 DB 枚举。
+ *  params_json 原样回传（可能含 photo_key 等临时信息），缺失 → 不含。 */
+export interface AvatarJob {
+  id: string;
+  kind: string;
+  status: string;
+  created_at: number;
+  params_json?: Record<string, unknown> | null;
+}
+
+/** 可走/碰撞网格层：2D 数组（0=可走, 1=阻挡）。null = 用静态 BAR_MAP 兜底。 */
+export type WalkableGrid = number[][];
+
+/** 地图视觉背景层信息。bg_key = assets.storage_key（null = 用静态 tile 渲染兜底）。
+ *  walkable = admin 手标的可走网格（null = 用静态 BAR_MAP 兜底，向后兼容）。 */
 export interface MapInfo {
   scene: string;
   width: number;
   height: number;
   bg_key: string | null;
+  walkable?: WalkableGrid | null;
 }
 
 export interface Member {
@@ -124,9 +163,9 @@ export const api = {
     req<{ id: number; username: string }>("POST", "/api/login", { username, password }),
   logout: () => req<void>("POST", "/api/logout"),
   saveAvatar: (config: ModularAvatar) => req<void>("PUT", "/api/avatar", { config }),
-  equip: (slot: "back" | "hand", assetId: string) =>
+  equip: (slot: EquipSlot, assetId: string) =>
     req<{ avatar: AvatarData }>("POST", "/api/avatar/equip", { slot, asset_id: assetId }),
-  unequip: (slot: "back" | "hand") =>
+  unequip: (slot: EquipSlot) =>
     req<{ avatar: AvatarData }>("POST", "/api/avatar/unequip", { slot }),
   generateAvatar: async (photo: File): Promise<{ job_id: string }> => {
     const form = new FormData();
@@ -150,6 +189,7 @@ export const api = {
   generateAvatarText: (description: string) =>
     req<{ job_id: string }>("POST", "/api/avatar/generate-text", { description }),
   pollAvatarJob: (jobId: string) => req<AvatarJobStatus>("GET", `/api/avatar/generate/${jobId}`),
+  listAvatarJobs: () => req<AvatarJob[]>("GET", "/api/avatar/jobs"),
   menu: () => req<MenuPayload>("GET", "/api/menu"),
   getMap: (scene: string) =>
     req<MapInfo>("GET", `/api/map?scene=${encodeURIComponent(scene)}`),
@@ -166,6 +206,11 @@ export const api = {
         prompt,
         scene: scene ?? "bar",
       }),
+    generateTileset: (prompt: string, tileSize?: number) =>
+      req<{ job_id: string }>("POST", "/api/admin/map/tileset", {
+        prompt,
+        tile_size: tileSize ?? 32,
+      }),
     listDecorations: (scene: string) =>
       req<Decoration[]>("GET", `/api/admin/decorations?scene=${encodeURIComponent(scene)}`),
     placeDecoration: (body: {
@@ -176,5 +221,12 @@ export const api = {
       z_layer?: number;
     }) => req<Decoration>("POST", "/api/admin/decorations", body),
     removeDecoration: (id: string) => req<void>("DELETE", `/api/admin/decorations/${id}`),
+    listMenu: () => req<AdminMenuItem[]>("GET", "/api/admin/menu"),
+    createMenu: (item: MenuInput) => req<AdminMenuItem>("POST", "/api/admin/menu", item),
+    updateMenu: (id: string, item: MenuInput) =>
+      req<AdminMenuItem>("PUT", `/api/admin/menu/${encodeURIComponent(id)}`, item),
+    deleteMenu: (id: string) => req<void>("DELETE", `/api/admin/menu/${encodeURIComponent(id)}`),
+    setWalkable: (scene: string, walkable: WalkableGrid) =>
+      req<void>("PUT", "/api/admin/map/walkable", { scene, walkable }),
   },
 };

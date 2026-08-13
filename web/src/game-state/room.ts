@@ -23,7 +23,7 @@ import type {
 const WALK_CYCLE = [0, 1, 0, 2] as const;
 const MAX_SAMPLES = 20;
 const MAX_CHAT = 50;
-const BUBBLE_TTL_MS = 4000;
+const BUBBLE_TTL_MS = 7000;
 
 /** djb2 风格稳定哈希，用作合成纹理缓存键（dev-plan §三 切片2：缓存键 = AvatarSnapshot 的稳定哈希）。 */
 function hashStr(s: string): string {
@@ -67,7 +67,11 @@ function snapToState(p: PlayerSnap, t: number): PlayerState {
 }
 
 /** 消费一条 ServerMsg，返回新 RoomState（浅拷贝 + 替换变更字段；不可变）。
- *  localMs = 发 ping 时的本地时间，仅 pong 用（注入时钟，不直调 Date.now）。 */
+ *  localMs = 注入的本地 performance.now() 时间戳（不直调 Date.now）：
+ *    pong → 发 ping 时的本地时间（clockOffset = m.t - localMs）；
+ *    chat → 收到消息时的本地时间（气泡 ts = localMs，age = nowMs - line.ts 纯客户端戳，
+ *           不依赖 clockOffset / server ts，修掉首条 pong 前气泡 age 为负的 bug）；
+ *    chat_backlog → 收到时的本地时间（历史 ts 标为刚过期，不弹气泡）。 */
 export function applyServerMsg(
   state: RoomState,
   m: ServerMsg,
@@ -117,9 +121,11 @@ export function applyServerMsg(
     }
 
     case "chat": {
+      // ts 用客户端收到时刻（performance.now()），不依赖 clockOffset/server ts；
+      // interpolate 的 age = nowMs - line.ts 纯客户端戳。
       const chat: ChatLine[] = [
         ...state.chat,
-        { from: m.from, name: m.name, text: m.text, ts: m.ts },
+        { from: m.from, name: m.name, text: m.text, ts: localMs },
       ];
       while (chat.length > MAX_CHAT) chat.shift();
       return { ...state, chat };
@@ -127,7 +133,14 @@ export function applyServerMsg(
 
     case "chat_backlog":
       // ChatItem 与 ChatLine 结构同形；截最近 MAX_CHAT 条。
-      return { ...state, chat: m.items.slice(-MAX_CHAT) };
+      // 历史消息不应弹气泡：ts 标为「刚过期」（interpolate 的 age > BUBBLE_TTL_MS）。
+      return {
+        ...state,
+        chat: m.items.slice(-MAX_CHAT).map((it) => ({
+          ...it,
+          ts: localMs - BUBBLE_TTL_MS - 1,
+        })),
+      };
 
     case "pong":
       // serverMs - localMs；localhost 近零延迟。
@@ -220,7 +233,8 @@ export function interpolate(
 
   const bubbles: BubbleView[] = [];
   for (const line of state.chat) {
-    const age = serverNow - line.ts;
+    // 纯客户端戳：line.ts = applyServerMsg 收到消息时的 performance.now()（不依赖 clockOffset）。
+    const age = nowMs - line.ts;
     if (age >= 0 && age <= BUBBLE_TTL_MS) {
       bubbles.push({ playerId: line.from, text: line.text });
     }

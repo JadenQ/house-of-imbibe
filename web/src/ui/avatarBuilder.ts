@@ -14,9 +14,12 @@ import {
   TOP_STYLES,
   BOTTOM_STYLES,
   SHOE_STYLES,
+  ACCESSORY_PRESETS,
+  presetEquippedItem,
+  presetName,
   type Dir,
 } from "../game/character";
-import { api, type ModularAvatar } from "../net/api";
+import { api, type ModularAvatar, type EquipSlot, type EquippedItem } from "../net/api";
 
 // ── localStorage 兜底（后端不持久化样式字段）──
 const LS_KEY = "hoi:modular-avatar";
@@ -69,6 +72,31 @@ const STYLE_LABELS: Record<string, string> = {
 };
 
 const DIR_LABELS: Record<Dir, string> = { s: "正", n: "背", w: "左", e: "右" };
+
+// ── 配饰区：4 slot，每 slot 一排 preset 按钮 + 卸下 ──
+const ACC_SLOTS: { slot: EquipSlot; label: string }[] = [
+  { slot: "hand", label: "手持" },
+  { slot: "back", label: "背饰" },
+  { slot: "hat", label: "帽子" },
+  { slot: "face", label: "眼镜" },
+];
+
+/** 当前 cfg.equipped 中某 slot 的 preset 名（非 preset / 未装备 → null）。 */
+function currentPreset(cfg: ModularAvatar, slot: EquipSlot): string | null {
+  const item = cfg.equipped?.find((i) => i.slot === slot);
+  return item ? presetName(item) : null;
+}
+
+/** 替换/追加 equipped 中同 slot 项（每 slot 至多一条）。返回新数组（不 mutate 原）。 */
+function setEquipped(cfg: ModularAvatar, item: EquippedItem): EquippedItem[] {
+  const rest = (cfg.equipped ?? []).filter((i) => i.slot !== item.slot);
+  return [...rest, item];
+}
+
+/** 移除 equipped 中某 slot（不 mutate 原）。 */
+function removeEquipped(cfg: ModularAvatar, slot: EquipSlot): EquippedItem[] {
+  return (cfg.equipped ?? []).filter((i) => i.slot !== slot);
+}
 
 const DEFAULT_CFG: ModularAvatar = {
   kind: "modular",
@@ -194,6 +222,25 @@ export function renderAvatarBuilder(opts: BuilderOpts): void {
     )
     .join("");
 
+  // ── 配饰区（4 slot × preset 按钮 + 卸下）──
+  optsEl.innerHTML += `<div class="bdr-sep"></div><div class="bdr-acc-title">配 饰</div>` +
+    ACC_SLOTS.map((s) => {
+      const cur = currentPreset(cfg, s.slot);
+      return `
+      <div class="bdr-row bdr-acc-row">
+        <span class="bdr-row-label">${s.label}</span>
+        <div class="bdr-pills bdr-acc-pills">
+          ${ACCESSORY_PRESETS[s.slot]
+            .map(
+              (p) =>
+                `<button class="bdr-pill${cur === p.name ? " sel" : ""}" data-preset="${s.slot}" data-val="${p.name}">${p.label}</button>`,
+            )
+            .join("")}
+          <button class="bdr-pill bdr-unequip${cur === null && cfg.equipped?.some((i) => i.slot === s.slot) ? " sel-warn" : ""}" data-unequip="${s.slot}">卸下</button>
+        </div>
+      </div>`;
+    }).join("");
+
   // ── 样式选择 ──
   optsEl.addEventListener("click", (e) => {
     const pill = (e.target as HTMLElement).closest("[data-style]") as HTMLElement | null;
@@ -210,12 +257,35 @@ export function renderAvatarBuilder(opts: BuilderOpts): void {
       cfg[k] = sw.dataset.val!;
       sw.parentElement!.querySelectorAll(".bdr-sw").forEach((b) => b.classList.toggle("sel", b === sw));
       renderPreview();
+      return;
+    }
+    // 选 preset → 写入 cfg.equipped（每 slot 至多一条）；预览即时更新，保存时随 saveAvatar 落库。
+    // 注：preset 为代码手绘（无 PNG asset），api.equip 需真实 asset_id 会 404，故经 saveAvatar 的
+    // equipped 透传持久化（validate_equipped 仅校验 slot，放行 preset 合成项）。
+    const pre = (e.target as HTMLElement).closest("[data-preset]") as HTMLElement | null;
+    if (pre) {
+      const slot = pre.dataset.preset as EquipSlot;
+      const name = pre.dataset.val!;
+      cfg.equipped = setEquipped(cfg, presetEquippedItem(slot, name));
+      pre.parentElement!.querySelectorAll(".bdr-pill").forEach((b) => b.classList.toggle("sel", b === pre));
+      pre.parentElement!.querySelector(".bdr-unequip")?.classList.remove("sel-warn");
+      renderPreview();
+      return;
+    }
+    const un = (e.target as HTMLElement).closest("[data-unequip]") as HTMLElement | null;
+    if (un) {
+      const slot = un.dataset.unequip as EquipSlot;
+      cfg.equipped = removeEquipped(cfg, slot);
+      un.parentElement!.querySelectorAll(".bdr-pill").forEach((b) => b.classList.remove("sel"));
+      un.classList.remove("sel-warn");
+      renderPreview();
+      return;
     }
   });
 
-  // ── 预览渲染 ──
+  // ── 预览渲染（characterSheet 接受 equipped → preset 代码手绘即时可见）──
   function renderPreview() {
-    const sheet = characterSheet(cfg);
+    const sheet = characterSheet(cfg, cfg.equipped);
     pctx.clearRect(0, 0, canvas.width, canvas.height);
     const row = DIRS.indexOf(dir);
     const sx = walkFrame * FRAME_W;
@@ -299,6 +369,11 @@ function ensureBuilderStyles() {
   .bdr-pill.sel { border-color: var(--accent); color: var(--accent); }
   .bdr-sw { width: 22px; height: 22px; }
   .bdr-sep { height: 1px; background: #4a3826; margin: 10px 0; }
+  .bdr-acc-title { font-size: 12px; color: var(--accent, #d4a24e); letter-spacing: 2px; margin: 4px 0 2px; }
+  .bdr-acc-row { align-items: flex-start; }
+  .bdr-acc-pills { max-width: 220px; }
+  .bdr-unequip { color: #9a8a70; }
+  .bdr-unequip.sel-warn { border-color: #c84028; color: #c84028; }
   @media (max-width: 420px) {
     .builder-panel { max-width: 96vw; padding: 12px; }
     .bdr-body { flex-direction: column; align-items: center; }

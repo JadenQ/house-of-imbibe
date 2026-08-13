@@ -2,7 +2,7 @@
 import Phaser from "phaser";
 import { api, type AvatarData, type Me } from "./net/api";
 import { showLogin } from "./ui/login";
-import { showAvatarCreate } from "./ui/avatarCreate";
+import { showAvatarCreate, showGenerationCenter } from "./ui/avatarCreate";
 import { loadModularLocal } from "./ui/avatarBuilder";
 import { showMenu, isMenuOpen, menuBlocksInteract } from "./ui/menu";
 import { createChatPanel } from "./ui/chat";
@@ -81,6 +81,8 @@ function startGame(me: Me, avatar: AvatarData) {
   document.getElementById("hud-edit")!.onclick = () => {
     void showAvatarCreate(avatar).then(() => location.reload());
   };
+  // 生成中心入口（查看历史/进行中的形象生成 job，非阻塞轮询）
+  document.getElementById("hud-gencenter")!.onclick = () => showGenerationCenter();
   // admin 入口：仅 is_admin 显示（Design 2 独立管理台，DOM 非 Phaser）
   if (me.is_admin) {
     const adminBtn = document.getElementById("hud-admin")!;

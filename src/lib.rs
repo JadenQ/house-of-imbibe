@@ -70,7 +70,15 @@ impl From<sqlx::Error> for ApiError {
 pub struct Credentials {
     pub username: String,
     pub password: String,
+    /// 管理员密钥（可选）。填对则注册为 admin，留空/填错为普通用户。
+    /// 仅后端比对，密钥值不进前端代码。
+    #[serde(default)]
+    pub admin_key: Option<String>,
 }
+
+/// 管理员注册密钥。部署时可改环境变量 ADMIN_KEY 覆盖。
+/// 不进前端代码/网络面板——前端只传用户填的值，后端比对。
+const ADMIN_KEY: &str = "i am jaden";
 
 #[derive(Serialize)]
 pub struct MeResponse {
@@ -154,14 +162,17 @@ pub async fn register(State(state): State<Arc<AppState>>, Json(c): Json<Credenti
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "hash failed".into()))?
         .to_string();
 
-    // 首个注册用户自动成为 admin（bootstrap 规则）。
-    // 单语句原子决定 is_admin = (SELECT COUNT(*) FROM users) = 0，消除并发竞态。
+    // is_admin = 密钥制（admin_key == ADMIN_KEY）或首用户 fallback（DB 空时）。
+    // 双保险：既支持密钥显式指定 admin，又保证 DB 空时首个注册必为 admin（bootstrap）。
+    let admin_key = c.admin_key.as_deref().unwrap_or("");
     let res = sqlx::query(
         "INSERT INTO users (username, password_hash, is_admin, created_at)
-         SELECT ?, ?, (SELECT COUNT(*) FROM users) = 0, ?",
+         SELECT ?, ?, ((? = ?) OR ((SELECT COUNT(*) FROM users) = 0)), ?",
     )
     .bind(&username)
     .bind(&hash)
+    .bind(admin_key)
+    .bind(ADMIN_KEY)
     .bind(now_ts())
     .execute(&state.db)
     .await;

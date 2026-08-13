@@ -157,8 +157,12 @@ async function req<T>(method: string, url: string, body?: unknown): Promise<T> {
 
 export const api = {
   me: () => req<Me>("GET", "/api/me"),
-  register: (username: string, password: string) =>
-    req<{ id: number; username: string }>("POST", "/api/register", { username, password }),
+  register: (username: string, password: string, adminKey?: string) =>
+    req<{ id: number; username: string; is_admin: boolean }>("POST", "/api/register", {
+      username,
+      password,
+      ...(adminKey ? { admin_key: adminKey } : {}),
+    }),
   login: (username: string, password: string) =>
     req<{ id: number; username: string }>("POST", "/api/login", { username, password }),
   logout: () => req<void>("POST", "/api/logout"),
